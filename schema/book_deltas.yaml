@@ -1,0 +1,77 @@
+table: book_deltas
+description: >-
+  Every change to a token's order book as received on the venue's market-data WebSocket, one row per price level
+  touched. Replaying the rows of one token in (host, line, item) order rebuilds its book: a `reset` row clears the
+  book (the levels of the full book follow as `set` rows with the same line), a `set` row sets the resting size at
+  one price level (0 removes it), and a `gap` row means the connection carrying this token dropped, so the book is
+  unknown until the next `reset`.
+order: [host, line, item]
+columns:
+  - name: venue
+    type: string
+    nullable: false
+    meaning: "`polymarket` or `kalshi`."
+  - name: market_id
+    type: string
+    nullable: true
+    meaning: Market identifier (Polymarket condition id, Kalshi market ticker). Null only on `gap` rows of tokens never seen with a market in that hour.
+  - name: token_id
+    type: string
+    nullable: false
+    meaning: Outcome token whose book changed (Polymarket asset id, Kalshi market ticker for the YES contract).
+  - name: recv_ts
+    type: timestamp
+    nullable: false
+    meaning: Time the recorder received the frame (recorder clock, chrony-synced), UTC ms.
+  - name: exchange_ts
+    type: timestamp
+    nullable: true
+    meaning: Venue timestamp of the event, UTC ms. Null on `gap` rows.
+  - name: action
+    type: string
+    nullable: false
+    meaning: "`reset` (full book follows), `set` (level size), `gap` (connection lost, book unknown), `tick_size` (tick size changed; see `tick_size`)."
+  - name: side
+    type: string
+    nullable: true
+    meaning: "`bid` or `ask` on `set` rows, null otherwise. Polymarket `BUY` levels are bids, `SELL` levels asks. Kalshi NO bids at p are YES asks at 1 - p."
+  - name: price
+    type: price
+    nullable: true
+    meaning: Price level, dollars per share. Null on `reset`, `gap` and `tick_size` rows.
+  - name: size
+    type: size
+    nullable: true
+    meaning: Resting size at `price` after the event (absolute, not a difference); 0 means the level was removed.
+  - name: best_bid
+    type: price
+    nullable: true
+    meaning: Best bid the venue reports after the event (Polymarket `price_change` only).
+  - name: best_ask
+    type: price
+    nullable: true
+    meaning: Best ask the venue reports after the event (Polymarket `price_change` only).
+  - name: book_hash
+    type: string
+    nullable: true
+    meaning: Venue hash of the book (Polymarket `book`) or of the change (`price_change`).
+  - name: tick_size
+    type: price
+    nullable: true
+    meaning: Tick size, on `reset` rows that carry it and on `tick_size` rows (new tick).
+  - name: host
+    type: string
+    nullable: false
+    meaning: Recorder host that produced the raw file (part of the ordering key; several hosts may record the same token).
+  - name: conn
+    type: int32
+    nullable: true
+    meaning: Recorder WebSocket connection id within the host.
+  - name: line
+    type: int64
+    nullable: false
+    meaning: Line number of the raw frame within the host's files for that hour (0-based, parts concatenated in order).
+  - name: item
+    type: int32
+    nullable: false
+    meaning: Position of the row among the rows produced from that line.

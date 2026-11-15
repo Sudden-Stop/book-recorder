@@ -1,0 +1,45 @@
+#!/bin/bash
+# First-boot setup for the book-recorder host (Amazon Linux 2023).
+# Installs Docker, the compose plugin and chrony, writes the deploy files and enables the
+# units. It does NOT start the recorder: set the SSM parameters first, then
+# `sudo systemctl start book-recorder` (docs/setup.md).
+set -euo pipefail
+exec > >(tee -a /var/log/book-recorder-setup.log) 2>&1
+
+dnf install -y docker chrony
+
+# Docker compose v2 plugin (not packaged in AL2023), checksum-verified.
+plugin_dir=/usr/libexec/docker/cli-plugins
+mkdir -p "$plugin_dir"
+asset="docker-compose-linux-${compose_platform}"
+base="https://github.com/docker/compose/releases/download/${compose_version}"
+curl -fsSL --retry 5 -o "/tmp/$asset" "$base/$asset"
+curl -fsSL --retry 5 -o "/tmp/$asset.sha256" "$base/$asset.sha256"
+(cd /tmp && sha256sum -c "$asset.sha256")
+install -m 0755 "/tmp/$asset" "$plugin_dir/docker-compose"
+rm -f "/tmp/$asset" "/tmp/$asset.sha256"
+
+mkdir -p /opt/book-recorder/bin /opt/book-recorder/secrets /etc/docker
+%{ for path, content in files ~}
+echo '${content}' | base64 -d > '${path}'
+%{ endfor ~}
+chmod 0755 /opt/book-recorder/bin/*.sh
+
+cat > /opt/book-recorder/.env <<'EOF'
+%{ for key, value in host_env ~}
+${key}=${value}
+%{ endfor ~}
+EOF
+chmod 0644 /opt/book-recorder/.env
+
+# Containers run as uid 10001.
+install -d -m 0750 -o 10001 -g 10001 /var/lib/book-recorder/data
+chmod 0700 /opt/book-recorder/secrets
+
+systemctl daemon-reload
+# AL2023's default chrony config already uses the Amazon Time Sync Service (169.254.169.123).
+systemctl enable --now chronyd docker
+systemctl enable book-recorder.service
+systemctl enable --now book-recorder-metrics.timer book-recorder-pipeline.timer
+
+echo "book-recorder host setup done"

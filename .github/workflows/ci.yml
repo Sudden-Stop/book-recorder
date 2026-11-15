@@ -1,0 +1,65 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    name: cargo test
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: recorder
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: recorder
+      - run: cargo test --all-targets
+
+  python:
+    name: pytest
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check for the pipeline project
+        id: has
+        run: |
+          if [ -f pipeline/pyproject.toml ]; then echo "pipeline=true" >> "$GITHUB_OUTPUT"; else echo "pipeline=false" >> "$GITHUB_OUTPUT"; echo "::notice::pipeline/pyproject.toml not found; skipping pytest"; fi
+      - uses: astral-sh/setup-uv@v5
+        if: steps.has.outputs.pipeline == 'true'
+        with:
+          python-version: "3.12"
+          enable-cache: true
+      - name: pytest
+        if: steps.has.outputs.pipeline == 'true'
+        working-directory: pipeline
+        run: |
+          uv sync --all-extras --dev
+          uv run pytest -q
+
+  terraform:
+    name: terraform fmt + validate
+    runs-on: ubuntu-24.04
+    defaults:
+      run:
+        working-directory: infra/terraform
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.9.8"
+      - run: terraform fmt -check -recursive
+      - run: terraform init -backend=false -input=false
+      - run: terraform validate

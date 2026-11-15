@@ -1,0 +1,87 @@
+table: coverage
+description: >-
+  Recording coverage per market per UTC hour and recorder host, built from the control lines (connect,
+  disconnect, subscribe, unsubscribe) of the market-data stream. A market is covered while one of its tokens is
+  subscribed on a connection that is up. Use it to drop or flag hours with gaps before estimating anything.
+order: [market_id]
+columns:
+  - name: venue
+    type: string
+    nullable: false
+    meaning: "`polymarket` or `kalshi`."
+  - name: hour_start
+    type: timestamp
+    nullable: false
+    meaning: Start of the UTC hour, UTC ms.
+  - name: host
+    type: string
+    nullable: false
+    meaning: Recorder host.
+  - name: market_id
+    type: string
+    nullable: true
+    meaning: Market identifier; null when tokens could not be mapped to a market in that hour (see `token_ids`).
+  - name: token_ids
+    type: list<string>
+    nullable: false
+    meaning: Tokens of the market seen in that hour (subscribed or with frames).
+  - name: subscribed_s
+    type: float64
+    nullable: false
+    meaning: Seconds of the hour during which at least one token was subscribed on some connection.
+  - name: connected_s
+    type: float64
+    nullable: false
+    meaning: Seconds during which at least one token was subscribed on a connection that was up.
+  - name: gap_s
+    type: float64
+    nullable: false
+    meaning: subscribed_s - connected_s.
+  - name: gap_count
+    type: int32
+    nullable: false
+    meaning: Disconnects of connections carrying the market during the hour.
+  - name: seq_gaps
+    type: int32
+    nullable: false
+    meaning: Sequence-number gaps reported on connections carrying the market (Kalshi `seq_gap` control lines); the book is unknown from the gap to the next snapshot.
+  - name: connects
+    type: int32
+    nullable: false
+    meaning: Connect control lines on connections carrying the market.
+  - name: start_assumed
+    type: bool
+    nullable: false
+    meaning: True when the state at the start of the hour was inferred (no connect line before the first frame or disconnect in this hour).
+  - name: n_book
+    type: int64
+    nullable: false
+    meaning: Full book frames (`reset`) received.
+  - name: n_level_changes
+    type: int64
+    nullable: false
+    meaning: Level changes (`set` rows outside full books) received.
+  - name: n_trades_ws
+    type: int64
+    nullable: false
+    meaning: Trades from the market-data WebSocket.
+  - name: n_tick_size_changes
+    type: int64
+    nullable: false
+    meaning: Tick size changes.
+  - name: n_snapshots
+    type: int64
+    nullable: false
+    meaning: REST book snapshots fetched.
+  - name: n_trades_activity
+    type: int64
+    nullable: false
+    meaning: Trades from the activity feed (Polymarket).
+  - name: first_recv_ts
+    type: timestamp
+    nullable: true
+    meaning: First market-data frame for the market in the hour, UTC ms.
+  - name: last_recv_ts
+    type: timestamp
+    nullable: true
+    meaning: Last market-data frame for the market in the hour, UTC ms.

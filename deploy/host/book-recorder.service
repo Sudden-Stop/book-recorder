@@ -1,0 +1,22 @@
+[Unit]
+Description=book-recorder stack (docker compose)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/opt/book-recorder
+ExecStartPre=/opt/book-recorder/bin/fetch-secrets.sh
+# A failed pull (e.g. GHCR hiccup) falls back to the image already on disk.
+ExecStartPre=-/usr/bin/docker compose pull recorder
+ExecStart=/usr/bin/docker compose up -d --remove-orphans recorder
+ExecReload=/opt/book-recorder/bin/fetch-secrets.sh
+ExecReload=/usr/bin/docker compose up -d --remove-orphans recorder
+ExecStop=/usr/bin/docker compose stop -t 60 recorder
+TimeoutStartSec=600
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

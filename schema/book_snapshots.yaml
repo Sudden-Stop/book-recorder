@@ -1,0 +1,70 @@
+table: book_snapshots
+description: >-
+  Full order books taken on a slow rotation, one row per token per snapshot. On Polymarket they come from the
+  REST `GET /book` endpoint, independent of the WebSocket feed (`source = rest`). On Kalshi they are the
+  `orderbook_snapshot` messages the recorder requests periodically on the market-data socket (`source = ws`);
+  they also appear as `reset` rows in `book_deltas`. `validate` replays `book_deltas` between consecutive
+  snapshots of a token (skipping the reset of the snapshot itself) and checks that the replayed book equals the
+  next snapshot.
+order: [token_id, recv_ts]
+columns:
+  - name: venue
+    type: string
+    nullable: false
+    meaning: "`polymarket` or `kalshi`."
+  - name: market_id
+    type: string
+    nullable: true
+    meaning: Market identifier (Polymarket condition id, Kalshi market ticker).
+  - name: token_id
+    type: string
+    nullable: false
+    meaning: Outcome token of the book.
+  - name: source
+    type: string
+    nullable: false
+    meaning: "`rest` (REST endpoint, independent of the socket) or `ws` (snapshot message on the market-data socket)."
+  - name: req_ts
+    type: timestamp
+    nullable: true
+    meaning: Time the recorder sent the REST request, UTC ms (`rest` only).
+  - name: recv_ts
+    type: timestamp
+    nullable: false
+    meaning: Time the recorder received the snapshot, UTC ms.
+  - name: exchange_ts
+    type: timestamp
+    nullable: true
+    meaning: Venue timestamp of the book state, UTC ms (Polymarket `timestamp`; null when the venue gives none).
+  - name: book_hash
+    type: string
+    nullable: true
+    meaning: Venue hash of the book (Polymarket).
+  - name: tick_size
+    type: price
+    nullable: true
+    meaning: Tick size at fetch time.
+  - name: min_order_size
+    type: size
+    nullable: true
+    meaning: Minimum order size at fetch time.
+  - name: neg_risk
+    type: bool
+    nullable: true
+    meaning: Polymarket negative-risk market flag.
+  - name: bids
+    type: levels
+    nullable: false
+    meaning: Bid levels, highest price first.
+  - name: asks
+    type: levels
+    nullable: false
+    meaning: Ask levels, lowest price first.
+  - name: host
+    type: string
+    nullable: false
+    meaning: Recorder host.
+  - name: line
+    type: int64
+    nullable: false
+    meaning: Line number of the raw record within the host's files for that hour and stream (for `ws`, the same line as the snapshot's `reset` in `book_deltas`).

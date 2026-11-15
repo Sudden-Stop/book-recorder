@@ -1,0 +1,64 @@
+# Runs on the recorder host from /opt/book-recorder (written there by user data).
+#   recorder  long-running, restarted always, health on http://localhost:8080/healthz
+#   pipeline  nightly batch job (profile "nightly"), started by book-recorder-pipeline.timer:
+#             docker compose --profile nightly run --rm pipeline
+#
+# /opt/book-recorder/.env holds the non-secret host config (bucket, region, host id, images).
+# The *.secrets.env files and secrets/kalshi.pem are written from SSM by bin/fetch-secrets.sh.
+
+name: book-recorder
+
+x-logging: &logging
+  driver: local
+  options:
+    max-size: "20m"
+    max-file: "5"
+
+services:
+  recorder:
+    image: ${RECORDER_IMAGE:-ghcr.io/sudden-stop/book-recorder:latest}
+    restart: always
+    env_file:
+      - path: .env
+      - path: recorder.secrets.env
+        required: false
+    environment:
+      BR_DATA_DIR: /data
+      BR_HEALTH_PORT: "8080"
+      RUST_LOG: ${RUST_LOG:-info}
+    volumes:
+      - /var/lib/book-recorder/data:/data
+      - ./secrets:/run/secrets:ro
+    ports:
+      # Loopback only: the host's metrics timer polls it; nothing is exposed publicly.
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "-m", "5", "http://localhost:8080/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 2m
+    # Time to close and flush the current hourly segment on SIGTERM.
+    stop_grace_period: 60s
+    mem_limit: 512m
+    logging: *logging
+
+  pipeline:
+    image: ${PIPELINE_IMAGE:-ghcr.io/sudden-stop/book-recorder-pipeline:latest}
+    profiles: ["nightly"]
+    restart: "no"
+    # Nightly entry point (pipeline/ console script). The `nightly` subcommand is assumed;
+    # override with PIPELINE_COMMAND in .env if the CLI names it differently.
+    command: ${PIPELINE_COMMAND:-book-pipeline nightly}
+    env_file:
+      - path: .env
+      - path: pipeline.secrets.env
+        required: false
+    environment:
+      PIPELINE_WORK_DIR: /work
+    volumes:
+      - /var/lib/book-recorder/pipeline:/work
+    mem_limit: 1g
+    memswap_limit: 1g
+    cpus: 1.5
+    logging: *logging

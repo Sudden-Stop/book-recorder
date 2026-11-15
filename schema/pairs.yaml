@@ -1,0 +1,64 @@
+table: pairs
+description: >-
+  Cross-venue matches written by the recorder (venue `cross`): a game listed on both Polymarket and Kalshi,
+  matched by league, date and both team codes. One row per Kalshi market of the matched event (Kalshi lists
+  one market per team, Polymarket one market with a token per team). The recorder rewrites the full list at
+  every universe refresh, so the rows with the latest `recv_ts` are the current matches.
+order: [recv_ts]
+columns:
+  - name: venue
+    type: string
+    nullable: false
+    meaning: "Always `cross`."
+  - name: recv_ts
+    type: timestamp
+    nullable: false
+    meaning: Time the recorder wrote the match list, UTC ms.
+  - name: league
+    type: string
+    nullable: true
+    meaning: League code of the game (e.g. `nba`).
+  - name: game_date
+    type: string
+    nullable: true
+    meaning: Game date as the matching rule uses it (YYYY-MM-DD).
+  - name: teams
+    type: list<string>
+    nullable: true
+    meaning: The two team codes the rule matched on.
+  - name: polymarket_market_id
+    type: string
+    nullable: false
+    meaning: Polymarket condition id.
+  - name: polymarket_slug
+    type: string
+    nullable: true
+    meaning: Polymarket market slug.
+  - name: polymarket_tokens
+    type: tokens
+    nullable: true
+    meaning: Polymarket outcome tokens and their labels.
+  - name: kalshi_event_ticker
+    type: string
+    nullable: false
+    meaning: Kalshi event ticker.
+  - name: kalshi_market_id
+    type: string
+    nullable: true
+    meaning: One Kalshi market ticker of that event (null if the event listed none).
+  - name: rule
+    type: string
+    nullable: false
+    meaning: Name of the matching rule that produced the pair.
+  - name: confidence
+    type: string
+    nullable: false
+    meaning: Confidence the recorder's rule assigns (`exact` for the league + date + team codes rule).
+  - name: raw
+    type: string
+    nullable: false
+    meaning: The recorder's pair record as JSON.
+  - name: host
+    type: string
+    nullable: false
+    meaning: Recorder host.
