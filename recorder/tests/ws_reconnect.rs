@@ -93,13 +93,26 @@ async fn records_frames_and_reconnects_after_a_drop() {
             None => format!("{}:frame", l["conn"]),
         })
         .collect();
+    // The server sends its frames without waiting, so the client may read the second frame
+    // before or after it handles Cmd::Add: within connection 1 the subscribe line can sit on
+    // either side of it. Everything else is fixed.
+    assert_eq!(summary.len(), 8, "{summary:?}");
+    let mut conn1 = summary[1..4].to_vec();
+    conn1.sort();
     assert_eq!(
-        summary,
-        ["1:connect", "1:frame", "1:frame", "1:subscribe", "1:disconnect", "2:connect", "2:frame", "2:disconnect"],
-        "the pong is not recorded and every gap is bracketed by control lines"
+        (&summary[0], conn1, &summary[4..]),
+        (
+            &"1:connect".to_string(),
+            vec!["1:frame".to_string(), "1:frame".to_string(), "1:subscribe".to_string()],
+            &["1:disconnect", "2:connect", "2:frame", "2:disconnect"].map(String::from)[..],
+        ),
+        "the pong is not recorded and every gap is bracketed by control lines: {summary:?}"
     );
-    assert_eq!(recorded[1]["msg"][0]["event_type"], "book");
-    assert_eq!(recorded[3]["assets"], serde_json::json!(["2"]));
+    let frames: Vec<&Value> = recorded[1..4].iter().filter(|l| l.get("ctl").is_none()).collect();
+    assert_eq!(frames[0]["msg"][0]["event_type"], "book");
+    assert_eq!(frames[1]["msg"]["event_type"], "price_change");
+    let subscribe = recorded[1..4].iter().find(|l| l["ctl"] == "subscribe").unwrap();
+    assert_eq!(subscribe["assets"], serde_json::json!(["2"]));
     assert_eq!(recorded[5]["assets"], serde_json::json!(["1", "2"]));
     assert_eq!(recorded[7]["reason"], "shutdown");
     assert_eq!(segment.lines, Some(8));
