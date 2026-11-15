@@ -47,8 +47,8 @@ services:
     image: ${PIPELINE_IMAGE:-ghcr.io/sudden-stop/book-recorder-pipeline:latest}
     profiles: ["nightly"]
     restart: "no"
-    # Nightly entry point (pipeline/ console script). The `nightly` subcommand is assumed;
-    # override with PIPELINE_COMMAND in .env if the CLI names it differently.
+    # Curates + validates every recorded hour of yesterday (UTC) in s3://$BR_S3_BUCKET
+    # (pipeline/src/book_pipeline/nightly.py). PIPELINE_COMMAND in .env overrides it.
     command: ${PIPELINE_COMMAND:-book-pipeline nightly}
     env_file:
       - path: .env

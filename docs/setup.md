@@ -187,13 +187,17 @@ nightly pipeline timer; the `book-recorder-health-check-failed` alarm should be 
 | New recorder image | `sudo systemctl restart book-recorder` (pulls `latest`), or pin a tag with `RECORDER_IMAGE=ghcr.io/sudden-stop/book-recorder:sha-abc1234` in `.env` |
 | Rotated a secret | `sudo systemctl reload book-recorder` |
 | Change recorder config | add `BR_*` variables to `.env` (see `recorder/src/config.rs`), then `sudo systemctl reload book-recorder` |
-| Run the pipeline now | `sudo systemctl start book-recorder-pipeline` |
-| Pipeline logs | `journalctl -u book-recorder-pipeline -n 200` |
+| Run the pipeline now (yesterday) | `sudo systemctl start book-recorder-pipeline` |
+| Re-run one day | `sudo docker compose --profile nightly run --rm pipeline book-pipeline nightly --dt 2026-11-16` (add `--force` to redo hours already curated) |
+| Pipeline logs | `journalctl -u book-recorder-pipeline -n 200`; the day's summary is `s3://<bucket>/reports/nightly/dt=<day>.json` |
 | Stop recording | `sudo systemctl stop book-recorder` (60 s grace to flush the open hour) |
 
 The pipeline container is capped at 1 GB of memory and 1.5 CPUs and runs at low CPU and IO priority at
-02:30 UTC. Its command defaults to `book-pipeline nightly`; set `PIPELINE_COMMAND` in `.env` if the
-pipeline's entry point differs.
+02:30 UTC. It runs `book-pipeline nightly`: for each venue (polymarket, kalshi, cross) it curates every hour
+of yesterday (UTC) that has raw data in the bucket into `curated/`, validates it, and writes reports under
+`reports/`. Hours already curated are skipped, so a rerun after a crash picks up where it stopped. A failing
+hour does not stop the others; it is listed in the summary and the job exits 1, which shows up as a failed
+`book-recorder-pipeline` unit. Publishing to Hugging Face stays a manual `book-pipeline publish` step.
 
 **Changing files under `deploy/`.** User data only runs on first boot, and Terraform ignores later changes to
 it (so a new AMI or an edited script never restarts the recorder). Copy changed files by hand:
