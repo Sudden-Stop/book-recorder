@@ -23,7 +23,7 @@ columns:
   - name: reason
     type: string
     nullable: true
-    meaning: "Why the record was written. `metadata`: `added`, `daily` or `final`. `universe`: the selection rule (`paired`, `top`, `fee_free`, `sample`), or `grace` for a market kept during its grace period. `lifecycle`: the Kalshi event type (e.g. `determined`, `settled`)."
+    meaning: "Why the record was written. `metadata`: `added`, `daily`, `removed` (left tracking, outcome not known yet) or `final` (outcome known). `universe`: the selection rule (`paired`, `top`, `fee_free`, `sample`), or `grace` for a market kept during its grace period. `lifecycle`: the Kalshi event type (e.g. `determined`, `settled`)."
   - name: market_id
     type: string
     nullable: false

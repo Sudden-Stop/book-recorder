@@ -93,14 +93,22 @@ async fn records_frames_and_reconnects_after_a_drop() {
             None => format!("{}:frame", l["conn"]),
         })
         .collect();
+    // The `subscribe` control line is written when the command is handled, which races with
+    // the server's first two frames: check where it may be, then the rest in strict order.
+    let at = summary.iter().position(|s| s == "1:subscribe").expect("the added asset is logged");
+    assert!((1..=3).contains(&at), "subscribe is logged while connection 1 is open: {summary:?}");
+    assert_eq!(recorded[at]["assets"], serde_json::json!(["2"]));
+    let mut rest = recorded.clone();
+    rest.remove(at);
+    let mut order = summary.clone();
+    order.remove(at);
     assert_eq!(
-        summary,
-        ["1:connect", "1:frame", "1:frame", "1:subscribe", "1:disconnect", "2:connect", "2:frame", "2:disconnect"],
+        order,
+        ["1:connect", "1:frame", "1:frame", "1:disconnect", "2:connect", "2:frame", "2:disconnect"],
         "the pong is not recorded and every gap is bracketed by control lines"
     );
-    assert_eq!(recorded[1]["msg"][0]["event_type"], "book");
-    assert_eq!(recorded[3]["assets"], serde_json::json!(["2"]));
-    assert_eq!(recorded[5]["assets"], serde_json::json!(["1", "2"]));
-    assert_eq!(recorded[7]["reason"], "shutdown");
+    assert_eq!(rest[1]["msg"][0]["event_type"], "book");
+    assert_eq!(rest[4]["assets"], serde_json::json!(["1", "2"]));
+    assert_eq!(rest[6]["reason"], "shutdown");
     assert_eq!(segment.lines, Some(8));
 }

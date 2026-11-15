@@ -12,6 +12,7 @@ pub mod pairs;
 pub mod polymarket;
 pub mod select;
 pub mod sink;
+pub mod state;
 pub mod uploader;
 pub mod ws;
 

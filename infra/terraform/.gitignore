@@ -5,3 +5,7 @@
 !terraform.tfvars.example
 crash.log
 .terraform.tfstate.lock.info
+
+# Saved plans can hold sensitive values; never commit them.
+*.tfplan
+tf.plan

@@ -322,7 +322,7 @@ def _records(frame) -> list[dict]:
 
 
 def markets(ln: RawLine, out: Out) -> None:
-    """Recorder line: `{"ts_ms","reason":"added|daily|final","market":<full Gamma record>}`."""
+    """Recorder line: `{"ts_ms","reason":"added|daily|removed|final","market":<full Gamma record>}`."""
     rec = ln.rec
     if rec.get("ctl"):
         return
