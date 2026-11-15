@@ -17,6 +17,9 @@ is_set() { [[ -n "$1" && "$1" != "UNSET" ]]; }
 
 umask 077
 mkdir -p "$dir/secrets"
+# Bind-mounted at /run/secrets; the container (uid 10001) must be able to enter it.
+chown 10001:10001 "$dir/secrets"
+chmod 0700 "$dir/secrets"
 
 kalshi_id=$(get kalshi/key-id)
 kalshi_key=$(get kalshi/private-key)
