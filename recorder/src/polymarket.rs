@@ -105,6 +105,22 @@ pub fn condition_id(market: &Value) -> Option<&str> {
     market["conditionId"].as_str().filter(|s| !s.is_empty())
 }
 
+/// Still trading: not closed and not deactivated.
+pub fn is_open(market: &Value) -> bool {
+    market["closed"] != Value::Bool(true) && market["active"] != Value::Bool(false)
+}
+
+/// True once the market is closed with its outcome known: UMA reports it resolved, or the
+/// outcome prices have settled to 0 and 1.
+pub fn resolved(market: &Value) -> bool {
+    if market["closed"] != Value::Bool(true) {
+        return false;
+    }
+    let prices: Vec<f64> = string_array(&market["outcomePrices"]).iter().filter_map(|p| p.parse().ok()).collect();
+    let settled = !prices.is_empty() && prices.iter().all(|p| *p == 0.0 || *p == 1.0) && prices.iter().sum::<f64>() == 1.0;
+    settled || market["umaResolutionStatus"] == "resolved"
+}
+
 /// `(token id, outcome)` for every token of a market.
 pub fn tokens(market: &Value) -> Vec<(String, String)> {
     let ids = string_array(&market["clobTokenIds"]);
@@ -157,6 +173,10 @@ pub fn parse_page(body: Value) -> (Vec<Value>, bool) {
 }
 
 /// All open markets by 24 h volume, paging until Gamma runs out or `max_pages` is reached.
+///
+/// Gamma refuses offsets above 2000 with a 422 ("offset too large"). The list is ordered
+/// by volume, so a page that fails after the first one only cuts the low-volume tail:
+/// keep what was fetched instead of losing the whole refresh.
 pub async fn fetch_active(http: &reqwest::Client, cfg: &PolymarketConfig) -> Result<Vec<Value>> {
     let mut markets = Vec::new();
     let mut seen = HashSet::new();
@@ -166,7 +186,15 @@ pub async fn fetch_active(http: &reqwest::Client, cfg: &PolymarketConfig) -> Res
             cfg.gamma_url,
             page * PAGE
         );
-        let (rows, more) = parse_page(get_json(http, &url).await?);
+        let body = match get_json(http, &url).await {
+            Ok(body) => body,
+            Err(error) if !markets.is_empty() => {
+                tracing::warn!(page, fetched = markets.len(), error = format!("{error:#}"), "gamma page failed; using the pages already fetched");
+                break;
+            }
+            Err(error) => return Err(error),
+        };
+        let (rows, more) = parse_page(body);
         for market in rows {
             if seen.insert(condition_id(&market).unwrap_or_default().to_string()) {
                 markets.push(market);
@@ -180,7 +208,9 @@ pub async fn fetch_active(http: &reqwest::Client, cfg: &PolymarketConfig) -> Res
     Ok(markets)
 }
 
-/// The latest record of markets that are no longer active (outcome and close time).
+/// The latest record of specific markets, open or closed. Used for markets that left
+/// tracking (outcome and close time) and for followed markets that fell out of the
+/// volume-ordered listing but may still be open.
 pub async fn fetch_final(http: &reqwest::Client, cfg: &PolymarketConfig, ids: &[String]) -> Result<Vec<Value>> {
     let mut out = Vec::new();
     for chunk in ids.chunks(20) {
@@ -265,6 +295,61 @@ mod tests {
         assert_eq!(parse_page(json!({"error": "x"})), (Vec::new(), false));
     }
 
+    /// Serves full pages up to offset 100 and Gamma's 422 beyond it.
+    async fn fake_gamma() -> String {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            loop {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let n = socket.read(&mut buf).await.unwrap_or(0);
+                    let head = String::from_utf8_lossy(&buf[..n]).to_string();
+                    let offset: usize =
+                        head.split("offset=").nth(1).and_then(|s| s.split(|c: char| !c.is_ascii_digit()).next()).and_then(|s| s.parse().ok()).unwrap_or(0);
+                    let (status, body) = if offset <= 100 {
+                        ("200 OK", Value::Array((offset..offset + PAGE).map(market).collect()).to_string())
+                    } else {
+                        ("422 Unprocessable Entity", r#"{"type":"validation error","error":"offset too large"}"#.to_string())
+                    };
+                    let response = format!("HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}", body.len());
+                    let _ = socket.write_all(response.as_bytes()).await;
+                });
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    fn config(gamma_url: String, max_pages: usize) -> PolymarketConfig {
+        PolymarketConfig {
+            enabled: true,
+            gamma_url,
+            clob_url: String::new(),
+            market_ws_url: String::new(),
+            live_ws_url: String::new(),
+            activity_enabled: false,
+            selection: crate::config::SelectionConfig { top_n: 1, fee_free_max: 0, fee_free_min_volume: 0.0, sample_n: 0, sample_min_volume: 0.0 },
+            paired_max: 0,
+            max_pages,
+            shard_size: 1,
+            snapshot_period_ms: 1,
+        }
+    }
+
+    #[tokio::test]
+    async fn a_refused_deep_page_keeps_the_pages_already_fetched() {
+        let url = fake_gamma().await;
+        let http = reqwest::Client::new();
+        let markets = fetch_active(&http, &config(url.clone(), 10)).await.unwrap();
+        assert_eq!(markets.len(), 200, "two good pages survive the 422 on the third");
+
+        // A failure on the very first page is still an error: there is nothing to fall back on.
+        let dead = config("http://127.0.0.1:1".to_string(), 10);
+        assert!(fetch_active(&http, &dead).await.is_err());
+    }
+
     #[test]
     fn candidate_reads_gamma_fields() {
         let m = market(1);
@@ -284,6 +369,18 @@ mod tests {
         let c = candidate(&free, &HashSet::new()).unwrap();
         assert!(c.fee_free);
         assert_eq!(c.volume_24h, 88.5);
+
+        // Open, closed without an outcome yet, and resolved.
+        assert!(is_open(&m) && !resolved(&m));
+        let mut closed = market(4);
+        closed["closed"] = json!(true);
+        closed["outcomePrices"] = json!("[\"0.62\",\"0.38\"]");
+        assert!(!is_open(&closed) && !resolved(&closed), "closed but still at trading prices");
+        closed["outcomePrices"] = json!("[\"1\",\"0\"]");
+        assert!(resolved(&closed));
+        closed["outcomePrices"] = json!("[\"0.5\",\"0.5\"]");
+        closed["umaResolutionStatus"] = json!("resolved");
+        assert!(resolved(&closed), "a split resolution counts once UMA reports it");
 
         let mut no_book = market(3);
         no_book["enableOrderBook"] = json!(false);

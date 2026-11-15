@@ -39,7 +39,7 @@ A segment cut short by a crash has no zstd end marker: readers must tolerate a t
 | `kalshi` | `book_events` | One signed connection: `orderbook_snapshot` / `orderbook_delta` for tracked markets, **all** public `trade`s, **all** `market_lifecycle_v2` events, plus command replies. Fresh snapshots are requested every `BR_KALSHI_SNAPSHOT_PERIOD_MS`. |
 | `kalshi` | `universe`, `markets` | As for Polymarket. |
 | `kalshi` | `series` | Series record of each tracked market (`fee_type`, `fee_multiplier`), refetched daily. |
-| `cross` | `pairs` | Events listed on both venues, matched by league + date + both team codes. |
+| `cross` | `pairs` | Games listed on both venues. Each pair names its rule: `exact` (league, date and both team codes, after the alias table in `recorder/src/pairs.rs`), `date_off_by_one`, or `one_team_code` (college games; a candidate to be checked). Only `exact` has confidence `exact`; the others are `candidate`. |
 
 ### Which markets
 
@@ -49,9 +49,21 @@ Refreshed hourly, the same rule on both venues (see `recorder/src/select.rs`):
 2. **top volume**: the top N by 24 h volume;
 3. **fee-free** (Polymarket): markets with fees disabled above a volume floor;
 4. **sample**: a stratified sample of the rest, by price bucket × time to resolution, ordered by a
-   hash of (UTC date, market id), so it is reproducible and not biased towards busy markets.
+   hash of the market id, so it is reproducible and not biased towards busy markets. The sample is
+   sticky: a sampled market stays recorded until the venue stops listing it as open, whatever
+   happens to its volume, so it is followed to its resolution. A place that frees up goes to the
+   stratum that currently holds the fewest sampled markets.
 
-A market that drops out stays recorded for `BR_UNIVERSE_GRACE_MS`.
+A market that drops out of the other groups stays recorded for `BR_UNIVERSE_GRACE_MS`.
+
+**Outcomes.** When a market leaves tracking, its record is written to `markets` with reason
+`final` if the venue already reports the outcome, otherwise `removed`. A `removed` market is asked
+for again (after 1 h, 2 h, 4 h … up to daily, for 45 days) and written as `final` once resolved.
+
+The followed sample and the markets awaiting an outcome are kept in
+`{BR_DATA_DIR}/state/{venue}.json`, so a restart does not lose them. The volume floors bound what
+can enter the sample: Polymarket lists only its 2,100 markets with the most 24 h volume, and Kalshi
+markets below `BR_KALSHI_SAMPLE_MIN_VOLUME` are not considered.
 
 ### Configuration
 
@@ -69,7 +81,8 @@ A market that drops out stays recorded for `BR_UNIVERSE_GRACE_MS`.
 | `BR_POLYMARKET_SNAPSHOT_PERIOD_MS` | `600000` | |
 | `BR_KALSHI_KEY_ID`, `BR_KALSHI_PRIVATE_KEY` or `BR_KALSHI_PRIVATE_KEY_FILE` | none | RSA key (PEM); Kalshi is enabled when both are set |
 | `BR_KALSHI_TOP_N` / `_SAMPLE_N` / `_PAIRED_MAX` | 120 / 80 / 100 | about 300 markets |
-| `BR_KALSHI_MAX_PAGES` | `300` | pages of 1,000 open markets scanned per refresh |
+| `BR_KALSHI_MAX_PAGES` | `300` | pages of 1,000 open markets scanned per refresh; each page is trimmed to markets above `BR_KALSHI_SAMPLE_MIN_VOLUME` or in a head-to-head game |
+| `BR_POLYMARKET_MAX_PAGES` | `21` | pages of 100 markets by volume; Gamma refuses offsets above 2000 |
 | `BR_KALSHI_SNAPSHOT_PERIOD_MS` | `600000` | |
 | `BR_LOG_LEVEL` | `info` | |
 

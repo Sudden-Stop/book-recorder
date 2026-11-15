@@ -13,7 +13,7 @@
 use crate::config::KalshiConfig;
 use crate::select::Candidate;
 use crate::ws::{Protocol, Reaction};
-use crate::{now_ms, parse_iso_ms};
+use crate::{now_ms, pairs, parse_iso_ms};
 use anyhow::{anyhow, bail, Context, Result};
 use base64::Engine;
 use rsa::pkcs1::DecodeRsaPrivateKey;
@@ -207,6 +207,22 @@ pub fn series_of(event_ticker: &str) -> &str {
     event_ticker.split('-').next().unwrap_or(event_ticker)
 }
 
+fn volume_24h(market: &Value) -> f64 {
+    dollars(&market["volume_24h_fp"]).or_else(|| dollars(&market["volume_24h"])).unwrap_or(0.0)
+}
+
+/// Whether a listed market can ever be selected: it trades at least `min_volume` contracts
+/// a day (the sample floor, which the volume ranking also clears), or it belongs to a
+/// head-to-head game that may be paired with Polymarket whatever its volume.
+pub fn worth_keeping(market: &Value, min_volume: f64) -> bool {
+    volume_24h(market) >= min_volume || market["event_ticker"].as_str().is_some_and(|e| pairs::kalshi_game(e).is_some())
+}
+
+/// True once the exchange has determined the market: `result` is `yes`, `no`, …
+pub fn resolved(market: &Value) -> bool {
+    market["result"].as_str().is_some_and(|r| !r.is_empty())
+}
+
 /// A Kalshi market record as a selection candidate.
 pub fn candidate(market: &Value, paired_events: &HashSet<String>) -> Option<Candidate> {
     let ticker = market["ticker"].as_str().filter(|s| !s.is_empty())?;
@@ -219,7 +235,7 @@ pub fn candidate(market: &Value, paired_events: &HashSet<String>) -> Option<Cand
         .find_map(|k| market[*k].as_str().and_then(parse_iso_ms));
     Some(Candidate {
         id: ticker.to_string(),
-        volume_24h: dollars(&market["volume_24h_fp"]).or_else(|| dollars(&market["volume_24h"])).unwrap_or(0.0),
+        volume_24h: volume_24h(market),
         price,
         end_ms: end,
         fee_free: false,
@@ -253,11 +269,20 @@ impl Rest {
         serde_json::from_str(&text).with_context(|| format!("GET {url}: not JSON"))
     }
 
-    /// Every open single-event market, paging by cursor.
-    pub async fn open_markets(&self, max_pages: usize) -> Result<Vec<Value>> {
+    /// Open single-event markets worth considering, paging by cursor, plus how many the
+    /// exchange listed in total.
+    ///
+    /// The full listing is about 190,000 markets and 425 MB of JSON (2026-11-15), most of
+    /// them with no volume, so each page is trimmed as it arrives (see [`worth_keeping`])
+    /// and the listing never sits in memory whole.
+    ///
+    /// `keep` are tickers kept whatever their volume: markets already tracked or in the
+    /// followed sample, which must stay visible for as long as the exchange lists them.
+    pub async fn open_markets(&self, max_pages: usize, min_volume: f64, keep: &HashSet<String>) -> Result<(Vec<Value>, usize)> {
         let mut markets = Vec::new();
         let mut seen = HashSet::new();
         let mut cursor = String::new();
+        let mut listed = 0usize;
         for _ in 0..max_pages {
             let mut path = format!("/markets?status=open&mve_filter=exclude&limit={PAGE}");
             if !cursor.is_empty() {
@@ -265,7 +290,9 @@ impl Rest {
             }
             let mut body = self.get(&path).await?;
             let (rows, next) = parse_page(&mut body);
-            for market in rows {
+            listed += rows.len();
+            let wanted = |m: &Value| worth_keeping(m, min_volume) || m["ticker"].as_str().is_some_and(|t| keep.contains(t));
+            for market in rows.into_iter().filter(wanted) {
                 if let Some(ticker) = market["ticker"].as_str() {
                     if seen.insert(ticker.to_string()) {
                         markets.push(market);
@@ -278,7 +305,7 @@ impl Rest {
             cursor = next;
             tokio::time::sleep(Duration::from_millis(120)).await;
         }
-        Ok(markets)
+        Ok((markets, listed))
     }
 
     /// Current records of specific markets, whatever their status (for final outcomes).
@@ -380,5 +407,21 @@ mod tests {
         let mut body = json!({ "markets": [market], "cursor": "abc" });
         let (rows, cursor) = parse_page(&mut body);
         assert_eq!((rows.len(), cursor.as_str()), (1, "abc"));
+    }
+
+    #[test]
+    fn the_listing_keeps_only_traded_markets_and_games() {
+        let traded = json!({ "ticker": "KXFED-26DEC-H25", "event_ticker": "KXFED-26DEC", "volume_24h_fp": "50.00" });
+        let quiet = json!({ "ticker": "KXFED-27DEC-H25", "event_ticker": "KXFED-27DEC", "volume_24h_fp": "49.99" });
+        let untraded = json!({ "ticker": "KXRAIN-26NOV16-T1", "event_ticker": "KXRAIN-26NOV16" });
+        let game = json!({ "ticker": "KXNBAGAME-26NOV18UTALAL-UTA", "event_ticker": "KXNBAGAME-26NOV18UTALAL", "volume_24h_fp": "0.00" });
+        assert!(worth_keeping(&traded, 50.0));
+        assert!(!worth_keeping(&quiet, 50.0));
+        assert!(!worth_keeping(&untraded, 50.0));
+        assert!(worth_keeping(&game, 50.0), "a game is kept for pairing even with no volume");
+
+        assert!(!resolved(&traded));
+        assert!(!resolved(&json!({ "ticker": "X", "result": "" })));
+        assert!(resolved(&json!({ "ticker": "X", "result": "yes" })));
     }
 }

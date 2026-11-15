@@ -5,9 +5,10 @@
 //!          ∪ fee-free markets above a volume floor (Polymarket)
 //!          ∪ a stratified sample of the rest, by price bucket × time to resolution.
 //!
-//! The sample is ordered by a hash of (UTC date, market id), so it is reproducible, stable
-//! within a day and independent of volume rank. A market that drops out stays tracked for
-//! a grace period so a refresh never cuts a market mid-event.
+//! The sample is ordered by a hash of the market id, so it is reproducible and independent
+//! of volume rank, and it is sticky: once sampled, a market stays selected until the venue
+//! stops listing it, so it is followed to its resolution. A market that drops out of the
+//! other groups stays tracked for a grace period so a refresh never cuts it mid-event.
 
 use crate::config::SelectionConfig;
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -60,8 +61,14 @@ pub fn horizon_bucket(end_ms: Option<i64>, now_ms: i64) -> u8 {
     }
 }
 
-/// Applies the rule. `paired_max` caps the paired group; `date` seeds the sample.
-pub fn select(candidates: &[Candidate], cfg: &SelectionConfig, paired_max: usize, date: &str, now_ms: i64) -> Vec<Selected> {
+/// Applies the rule. `paired_max` caps the paired group; `followed` is the sample so far.
+pub fn select(
+    candidates: &[Candidate],
+    cfg: &SelectionConfig,
+    paired_max: usize,
+    followed: &HashSet<String>,
+    now_ms: i64,
+) -> Vec<Selected> {
     let mut by_volume: Vec<&Candidate> = candidates.iter().collect();
     by_volume.sort_by(|a, b| b.volume_24h.total_cmp(&a.volume_24h).then_with(|| a.id.cmp(&b.id)));
 
@@ -103,35 +110,50 @@ pub fn select(candidates: &[Candidate], cfg: &SelectionConfig, paired_max: usize
         }
     }
 
-    // Stratified sample: round-robin over strata, each ordered by the date-seeded hash.
+    // Stratified sample. A market already in the sample stays for as long as the venue
+    // lists it, whatever its volume, price or horizon have become: that is what lets the
+    // dataset follow a market to its resolution.
     let rank_of: HashMap<&str, usize> = by_volume.iter().enumerate().map(|(i, c)| (c.id.as_str(), i + 1)).collect();
+    let stratum = |c: &Candidate| (price_bucket(c.price), horizon_bucket(c.end_ms, now_ms));
+    let mut filled: HashMap<(u8, u8), usize> = HashMap::new();
+    n = 0;
+    for c in &by_volume {
+        if followed.contains(&c.id) && take(c, "sample", rank_of[c.id.as_str()], &mut out) {
+            n += 1;
+            *filled.entry(stratum(c)).or_default() += 1;
+        }
+    }
+
+    // Free places go to new markets above the volume floor, ordered inside each stratum
+    // by a hash of the market id: reproducible and independent of volume rank.
     let mut strata: BTreeMap<(u8, u8), Vec<(u64, &Candidate)>> = BTreeMap::new();
     for c in &by_volume {
         if c.volume_24h < cfg.sample_min_volume {
             break;
         }
-        let key = (price_bucket(c.price), horizon_bucket(c.end_ms, now_ms));
-        strata.entry(key).or_default().push((fnv1a(format!("{date}|{}", c.id).as_bytes()), c));
+        strata.entry(stratum(c)).or_default().push((fnv1a(c.id.as_bytes()), c));
     }
     for members in strata.values_mut() {
         members.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.id.cmp(&b.1.id)));
         members.reverse(); // pop() takes the smallest hash first
     }
-    // Visit strata in a date-seeded order too, so no price or horizon bucket is favoured
-    // when the sample is smaller than the number of strata.
-    let mut strata: Vec<((u8, u8), Vec<(u64, &Candidate)>)> = strata.into_iter().collect();
-    strata.sort_by_key(|((p, h), _)| fnv1a(format!("{date}|stratum|{p}|{h}").as_bytes()));
-    n = 0;
-    while n < cfg.sample_n && strata.iter().any(|(_, m)| !m.is_empty()) {
-        for (_, members) in strata.iter_mut() {
-            if n >= cfg.sample_n {
-                break;
-            }
-            while let Some((_, c)) = members.pop() {
-                if take(c, "sample", rank_of[c.id.as_str()], &mut out) {
-                    n += 1;
-                    break;
-                }
+    // Each place goes to the stratum holding the fewest sampled markets (ties broken by a
+    // hash of the stratum). Long-dated markets hold their place for months, so without
+    // this the sample would drift towards them as short-dated ones resolve.
+    let order = |key: &(u8, u8)| fnv1a(format!("stratum|{}|{}", key.0, key.1).as_bytes());
+    while n < cfg.sample_n {
+        let Some(key) = strata
+            .iter()
+            .filter(|(_, members)| !members.is_empty())
+            .map(|(key, _)| *key)
+            .min_by_key(|key| (filled.get(key).copied().unwrap_or(0), order(key)))
+        else {
+            break;
+        };
+        if let Some((_, c)) = strata.get_mut(&key).and_then(|members| members.pop()) {
+            if take(c, "sample", rank_of[c.id.as_str()], &mut out) {
+                n += 1;
+                *filled.entry(key).or_default() += 1;
             }
         }
     }
@@ -222,9 +244,13 @@ mod tests {
         pool
     }
 
+    fn sample(sel: &[Selected]) -> Vec<String> {
+        sel.iter().filter(|s| s.reason == "sample").map(|s| s.id.clone()).collect()
+    }
+
     #[test]
     fn groups_are_applied_in_order_without_duplicates() {
-        let picked = select(&pool(), &cfg(), 5, "2026-11-15", 0);
+        let picked = select(&pool(), &cfg(), 5, &HashSet::new(), 0);
         let by_reason = |r: &str| picked.iter().filter(|s| s.reason == r).map(|s| s.id.as_str()).collect::<Vec<_>>();
         assert_eq!(by_reason("paired"), vec!["pair1"]);
         assert_eq!(by_reason("top_volume"), vec!["big1", "big2"]);
@@ -237,13 +263,10 @@ mod tests {
     }
 
     #[test]
-    fn the_sample_is_deterministic_per_day_and_spreads_over_strata() {
-        let a = select(&pool(), &cfg(), 5, "2026-11-15", 0);
-        let b = select(&pool(), &cfg(), 5, "2026-11-15", 0);
+    fn the_sample_is_deterministic_and_spreads_over_strata() {
+        let a = select(&pool(), &cfg(), 5, &HashSet::new(), 0);
+        let b = select(&pool(), &cfg(), 5, &HashSet::new(), 0);
         assert_eq!(a, b);
-        let sample = |sel: &[Selected]| sel.iter().filter(|s| s.reason == "sample").map(|s| s.id.clone()).collect::<Vec<_>>();
-        let other_day = select(&pool(), &cfg(), 5, "2026-11-16", 0);
-        assert_ne!(sample(&a), sample(&other_day), "a different day reshuffles the sample");
 
         // Three picks come from three different strata.
         let pool = pool();
@@ -255,6 +278,46 @@ mod tests {
             })
             .collect();
         assert_eq!(strata.len(), 3);
+    }
+
+    #[test]
+    fn a_sampled_market_is_followed_until_it_is_no_longer_listed() {
+        let first = sample(&select(&pool(), &cfg(), 5, &HashSet::new(), 0));
+        let followed: HashSet<String> = first.iter().cloned().collect();
+
+        // Next refresh: every sampled market has fallen below the volume floor and many new
+        // markets appeared. The sample does not move.
+        let mut later = pool();
+        for c in later.iter_mut().filter(|c| followed.contains(&c.id)) {
+            c.volume_24h = 0.5;
+        }
+        later.extend((0..40).map(|i| cand(&format!("new{i:02}"), 60.0, [0.05, 0.5][i % 2], 3)));
+        let mut again = sample(&select(&later, &cfg(), 5, &followed, 0));
+        again.sort();
+        let mut expected = first.clone();
+        expected.sort();
+        assert_eq!(again, expected);
+
+        // One of them resolves and is no longer listed: its place goes to a new market.
+        let gone = first[0].clone();
+        later.retain(|c| c.id != gone);
+        let after = sample(&select(&later, &cfg(), 5, &followed, 0));
+        assert_eq!(after.len(), 3);
+        assert!(!after.contains(&gone));
+        assert!(first[1..].iter().all(|id| after.contains(id)), "the others are still followed");
+    }
+
+    #[test]
+    fn free_places_go_to_the_emptiest_stratum() {
+        // Two followed markets sit in the same stratum; the one free place must not go there.
+        let mut pool = vec![cand("f1", 20.0, 0.5, 40), cand("f2", 20.0, 0.5, 40)];
+        pool.extend((0..5).map(|i| cand(&format!("same{i}"), 100.0 + i as f64, 0.5, 40)));
+        pool.push(cand("other", 15.0, 0.05, 0));
+        let followed: HashSet<String> = ["f1".to_string(), "f2".to_string()].into();
+        let cfg = SelectionConfig { top_n: 0, fee_free_max: 0, fee_free_min_volume: 0.0, sample_n: 3, sample_min_volume: 10.0 };
+        let mut picked = sample(&select(&pool, &cfg, 0, &followed, 0));
+        picked.sort();
+        assert_eq!(picked, vec!["f1", "f2", "other"]);
     }
 
     #[test]
