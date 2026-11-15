@@ -145,7 +145,8 @@ impl Config {
                     sample_min_volume: get("BR_POLYMARKET_SAMPLE_MIN_VOLUME", 500.0)?,
                 },
                 paired_max: get("BR_POLYMARKET_PAIRED_MAX", 100)?,
-                max_pages: get("BR_POLYMARKET_MAX_PAGES", 40)?,
+                // Gamma refuses offsets above 2000: 21 pages of 100 is all it serves.
+                max_pages: get("BR_POLYMARKET_MAX_PAGES", 21)?,
                 shard_size: get("BR_POLYMARKET_SHARD_SIZE", 200)?,
                 snapshot_period_ms: get("BR_POLYMARKET_SNAPSHOT_PERIOD_MS", 600_000)?,
             },

@@ -93,27 +93,22 @@ async fn records_frames_and_reconnects_after_a_drop() {
             None => format!("{}:frame", l["conn"]),
         })
         .collect();
-    // The server sends its frames without waiting, so the client may read the second frame
-    // before or after it handles Cmd::Add: within connection 1 the subscribe line can sit on
-    // either side of it. Everything else is fixed.
-    assert_eq!(summary.len(), 8, "{summary:?}");
-    let mut conn1 = summary[1..4].to_vec();
-    conn1.sort();
+    // The `subscribe` control line is written when the command is handled, which races with
+    // the server's first two frames: check where it may be, then the rest in strict order.
+    let at = summary.iter().position(|s| s == "1:subscribe").expect("the added asset is logged");
+    assert!((1..=3).contains(&at), "subscribe is logged while connection 1 is open: {summary:?}");
+    assert_eq!(recorded[at]["assets"], serde_json::json!(["2"]));
+    let mut rest = recorded.clone();
+    rest.remove(at);
+    let mut order = summary.clone();
+    order.remove(at);
     assert_eq!(
-        (&summary[0], conn1, &summary[4..]),
-        (
-            &"1:connect".to_string(),
-            vec!["1:frame".to_string(), "1:frame".to_string(), "1:subscribe".to_string()],
-            &["1:disconnect", "2:connect", "2:frame", "2:disconnect"].map(String::from)[..],
-        ),
-        "the pong is not recorded and every gap is bracketed by control lines: {summary:?}"
+        order,
+        ["1:connect", "1:frame", "1:frame", "1:disconnect", "2:connect", "2:frame", "2:disconnect"],
+        "the pong is not recorded and every gap is bracketed by control lines"
     );
-    let frames: Vec<&Value> = recorded[1..4].iter().filter(|l| l.get("ctl").is_none()).collect();
-    assert_eq!(frames[0]["msg"][0]["event_type"], "book");
-    assert_eq!(frames[1]["msg"]["event_type"], "price_change");
-    let subscribe = recorded[1..4].iter().find(|l| l["ctl"] == "subscribe").unwrap();
-    assert_eq!(subscribe["assets"], serde_json::json!(["2"]));
-    assert_eq!(recorded[5]["assets"], serde_json::json!(["1", "2"]));
-    assert_eq!(recorded[7]["reason"], "shutdown");
+    assert_eq!(rest[1]["msg"][0]["event_type"], "book");
+    assert_eq!(rest[4]["assets"], serde_json::json!(["1", "2"]));
+    assert_eq!(rest[6]["reason"], "shutdown");
     assert_eq!(segment.lines, Some(8));
 }

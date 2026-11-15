@@ -53,7 +53,7 @@ columns:
   - name: confidence
     type: string
     nullable: false
-    meaning: Confidence the recorder's rule assigns (`exact` for the league + date + team codes rule).
+    meaning: Confidence the recorder's rule assigns. `exact` for rule `exact` (league + date + both team codes); `candidate` for `date_off_by_one` and `one_team_code`, which should be checked before use.
   - name: raw
     type: string
     nullable: false

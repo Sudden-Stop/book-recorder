@@ -46,7 +46,7 @@ short by a crash (no zstd end marker) yields its complete lines; the cut part is
 | `polymarket` | `book_events` | market channel: `book`, `price_change`, `last_trade_price`, `tick_size_change` | `book_deltas`, `trades`, `coverage` |
 | `polymarket` | `book_snapshots` | `{asset, recv_ms, req_ms, status, msg:<REST /book body>}`; non-200 skipped and counted | `book_snapshots` (`source=rest`) |
 | `polymarket` | `activity` | `{"type":"trades","topic":"activity","payload":{…}}` | `trades` (with wallet) |
-| `polymarket` | `markets` | `{ts_ms, reason: added/daily/final, market:<Gamma record>}` | `markets` (`source=metadata`) |
+| `polymarket` | `markets` | `{ts_ms, reason: added/daily/removed/final, market:<Gamma record>}` | `markets` (`source=metadata`) |
 | `polymarket` | `universe` | `{ts_ms, pool, selected:[{condition_id, slug, reason, rank, volume24hr, tokens}], in_grace, added, removed}` | `markets` (`source=universe`) |
 | `kalshi` | `book_events` | one socket, split by `type`: `orderbook_snapshot`, `orderbook_delta`, `trade` (all markets), `market_lifecycle_v2` (all markets), replies `subscribed`/`ok`/`error` | `book_deltas`, `book_snapshots` (`source=ws`), `trades`, `markets` (`source=lifecycle`), `coverage` |
 | `kalshi` | `markets`, `universe` | as Polymarket, with Kalshi market records / tickers | `markets` |

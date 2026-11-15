@@ -294,7 +294,7 @@ def _market_row(m: dict, ts: int, source: str, host: str, out: Out, extra: dict 
 
 
 def markets(ln: RawLine, out: Out) -> None:
-    """Recorder line: `{"ts_ms","reason":"added|daily|final","market":<Kalshi market record>}`."""
+    """Recorder line: `{"ts_ms","reason":"added|daily|removed|final","market":<Kalshi market record>}`."""
     rec = ln.rec
     if rec.get("ctl") or not isinstance(rec.get("market"), dict):
         out.stats["skipped.markets"] += 0 if rec.get("ctl") else 1
