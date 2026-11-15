@@ -1,0 +1,16 @@
+[Unit]
+Description=book-recorder nightly pipeline (curate, validate)
+Requires=docker.service
+After=docker.service network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=/opt/book-recorder
+ExecStartPre=/opt/book-recorder/bin/fetch-secrets.sh
+ExecStartPre=/usr/bin/install -d -m 0750 -o 10001 -g 10001 /var/lib/book-recorder/pipeline
+ExecStartPre=-/usr/bin/docker compose --profile nightly pull pipeline
+ExecStart=/usr/bin/docker compose --profile nightly run --rm pipeline
+# Lower priority than the recorder on a 2-vCPU host.
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=6h

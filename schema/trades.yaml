@@ -1,0 +1,88 @@
+table: trades
+description: >-
+  Trades from two kinds of source: the market-data WebSocket (`market_ws`: Polymarket `last_trade_price`, Kalshi
+  `trade`), which has the taker side but no wallet, and Polymarket's global activity feed (`activity`), which has
+  the wallet of one side of the fill. The same fill can appear once per source; there is no cross-source dedup.
+order: [host, line, item]
+columns:
+  - name: venue
+    type: string
+    nullable: false
+    meaning: "`polymarket` or `kalshi`."
+  - name: market_id
+    type: string
+    nullable: true
+    meaning: Market identifier.
+  - name: token_id
+    type: string
+    nullable: false
+    meaning: Outcome token traded (price and side are in this token's terms).
+  - name: recv_ts
+    type: timestamp
+    nullable: false
+    meaning: Time the recorder received the frame, UTC ms.
+  - name: exchange_ts
+    type: timestamp
+    nullable: true
+    meaning: "Venue trade time, UTC ms. Polymarket activity and Kalshi give whole seconds (ms part is 000)."
+  - name: source
+    type: string
+    nullable: false
+    meaning: "`market_ws` or `activity`."
+  - name: price
+    type: price
+    nullable: false
+    meaning: Trade price, dollars per share. Activity-feed prices arrive as binary floats and are rounded to 6 decimals.
+  - name: size
+    type: size
+    nullable: false
+    meaning: Shares (Polymarket) or contracts (Kalshi).
+  - name: side
+    type: string
+    nullable: true
+    meaning: "`buy` or `sell`. For `market_ws` it is the taker's side. For `activity` it is the side of `wallet` in this fill, as the feed reports it; whether that wallet was the taker is not established."
+  - name: fee_rate_bps
+    type: int32
+    nullable: true
+    meaning: Fee rate in basis points reported with the trade (Polymarket `last_trade_price`).
+  - name: trade_id
+    type: string
+    nullable: true
+    meaning: Venue trade id (Kalshi).
+  - name: tx_hash
+    type: string
+    nullable: true
+    meaning: Settlement transaction hash (Polymarket, on Polygon).
+  - name: wallet
+    type: string
+    nullable: true
+    sensitive: wallet
+    meaning: Proxy wallet address from the activity feed, lower-case. Raw, salted-hashed or removed at publish time (see the wallet policy).
+  - name: outcome
+    type: string
+    nullable: true
+    meaning: Outcome label of the token, when the source gives it.
+  - name: outcome_index
+    type: int32
+    nullable: true
+    meaning: Outcome index of the token, when the source gives it.
+  - name: event_slug
+    type: string
+    nullable: true
+    meaning: Event slug, when the source gives it.
+  - name: host
+    type: string
+    nullable: false
+    meaning: Recorder host.
+  - name: conn
+    type: int32
+    nullable: true
+    meaning: Recorder connection id.
+  - name: line
+    type: int64
+    nullable: false
+    meaning: Line number of the raw frame within the host's files for that hour and stream.
+  - name: item
+    type: int32
+    nullable: false
+    meaning: Position of the row among the rows produced from that line.

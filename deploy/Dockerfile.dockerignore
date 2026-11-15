@@ -1,0 +1,4 @@
+# Used by BuildKit for deploy/Dockerfile (context = repo root). Send only the crate.
+*
+!recorder/
+recorder/target/

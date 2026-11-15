@@ -1,0 +1,6 @@
+[Unit]
+Description=Publish book-recorder health and disk metrics to CloudWatch
+
+[Service]
+Type=oneshot
+ExecStart=/opt/book-recorder/bin/report-metrics.sh

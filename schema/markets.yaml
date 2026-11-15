@@ -1,0 +1,110 @@
+table: markets
+description: >-
+  Market metadata as recorded, one row per market per record; the latest row before a time is the state known
+  at that time, and `raw` keeps the full venue record. Sources: `metadata` (the venue's full market record,
+  written when a market is added, once a day, and a `final` record when it leaves the selection, which carries
+  the outcome), `universe` (the recorder's hourly selection: which markets were tracked and why), `lifecycle`
+  (Kalshi `market_lifecycle_v2` events for every market on the exchange: opened, closed, determined,
+  settled), and `series` (Kalshi series records with the fee schedule; `market_id` holds the series ticker).
+order: [market_id, snapshot_ts]
+columns:
+  - name: venue
+    type: string
+    nullable: false
+    meaning: "`polymarket` or `kalshi`."
+  - name: snapshot_ts
+    type: timestamp
+    nullable: false
+    meaning: Time the record was written by the recorder, UTC ms.
+  - name: source
+    type: string
+    nullable: false
+    meaning: "`metadata`, `universe`, `lifecycle` or `series`."
+  - name: reason
+    type: string
+    nullable: true
+    meaning: "Why the record was written. `metadata`: `added`, `daily` or `final`. `universe`: the selection rule (`paired`, `top`, `fee_free`, `sample`), or `grace` for a market kept during its grace period. `lifecycle`: the Kalshi event type (e.g. `determined`, `settled`)."
+  - name: market_id
+    type: string
+    nullable: false
+    meaning: Market identifier (series ticker on `series` rows).
+  - name: event_id
+    type: string
+    nullable: true
+    meaning: Event the market belongs to (Polymarket event slug, Kalshi event ticker).
+  - name: slug
+    type: string
+    nullable: true
+    meaning: Market slug (Polymarket).
+  - name: question
+    type: string
+    nullable: true
+    meaning: Market question or title.
+  - name: tokens
+    type: tokens
+    nullable: true
+    meaning: Outcome tokens and their labels.
+  - name: tick_size
+    type: price
+    nullable: true
+    meaning: Minimum price increment.
+  - name: min_order_size
+    type: size
+    nullable: true
+    meaning: Minimum order size.
+  - name: neg_risk
+    type: bool
+    nullable: true
+    meaning: Polymarket negative-risk flag.
+  - name: end_ts
+    type: timestamp
+    nullable: true
+    meaning: Scheduled end or close time, UTC ms.
+  - name: closed
+    type: bool
+    nullable: true
+    meaning: Whether the venue reports the market closed.
+  - name: resolved_outcome
+    type: string
+    nullable: true
+    meaning: Winning outcome label once resolved (Kalshi `result`; Polymarket from `outcomePrices` when one price is 1).
+  - name: resolution_ts
+    type: timestamp
+    nullable: true
+    meaning: Resolution time when the venue gives it, UTC ms.
+  - name: volume_24h
+    type: float64
+    nullable: true
+    meaning: Venue-reported 24 h volume (dollars on Polymarket, contracts on Kalshi) at snapshot time.
+  - name: fees_enabled
+    type: bool
+    nullable: true
+    meaning: Whether taker fees apply (Polymarket `feesEnabled`).
+  - name: fee_type
+    type: string
+    nullable: true
+    meaning: Kalshi series fee type (`series` rows only; join to markets on the series prefix of `event_id`, e.g. `KXNBAGAME`).
+  - name: fee_multiplier
+    type: float64
+    nullable: true
+    meaning: Kalshi series fee multiplier (same rows as `fee_type`).
+  - name: tags
+    type: list<string>
+    nullable: true
+    meaning: Venue tags or category labels.
+  - name: universe_rank
+    type: int32
+    nullable: true
+    meaning: Rank in the recorder's universe selection (`universe` rows).
+  - name: in_grace
+    type: bool
+    nullable: true
+    meaning: Market left the selection but is still recorded during the grace period (`universe` rows).
+  - name: raw
+    type: string
+    nullable: false
+    meaning: The venue's record as JSON, unmodified.
+  - name: host
+    type: string
+    nullable: false
+    meaning: Recorder host.

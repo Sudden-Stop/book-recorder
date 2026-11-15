@@ -1,0 +1,84 @@
+name: image
+
+# Builds the recorder (and, once pipeline/ exists, the pipeline) image for linux/amd64 and
+# linux/arm64 and pushes it to GHCR. Pull requests build without pushing.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+    paths:
+      - recorder/**
+      - pipeline/**
+      - schema/**
+      - deploy/**
+      - .github/workflows/image.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: image-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: book-recorder
+            dockerfile: deploy/Dockerfile
+            requires: recorder/Cargo.toml
+          - name: book-recorder-pipeline
+            dockerfile: deploy/pipeline.Dockerfile
+            requires: pipeline/pyproject.toml
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check sources exist
+        id: has
+        run: |
+          if [ -f "${{ matrix.requires }}" ]; then echo "ok=true" >> "$GITHUB_OUTPUT"; else echo "ok=false" >> "$GITHUB_OUTPUT"; echo "::notice::${{ matrix.requires }} not found; skipping ${{ matrix.name }}"; fi
+
+      # Only the small runtime stages run under emulation; Rust cross-compiles natively.
+      - uses: docker/setup-qemu-action@v3
+        if: steps.has.outputs.ok == 'true'
+      - uses: docker/setup-buildx-action@v3
+        if: steps.has.outputs.ok == 'true'
+
+      - uses: docker/login-action@v3
+        if: steps.has.outputs.ok == 'true' && github.event_name != 'pull_request'
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: meta
+        if: steps.has.outputs.ok == 'true'
+        uses: docker/metadata-action@v5
+        with:
+          # GHCR names must be lower case.
+          images: ghcr.io/${{ github.repository_owner }}/${{ matrix.name }}
+          tags: |
+            type=raw,value=latest,enable={{is_default_branch}}
+            type=sha,format=short
+            type=semver,pattern={{version}}
+            type=ref,event=pr
+
+      - uses: docker/build-push-action@v6
+        if: steps.has.outputs.ok == 'true'
+        with:
+          context: .
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.name }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.name }}
+          provenance: false
