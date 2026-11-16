@@ -101,9 +101,7 @@ class TableWriter:
         arrays = [self._array(f, self.cols[f.name]) for f in self.schema]
         batch = pa.RecordBatch.from_arrays(arrays, schema=self.schema)
         if self._writer is None:
-            self.root.makedirs(self.path)
-            self._sink = self.root.fs.open_output_stream(self.path + ".tmp")
-            self._writer = pq.ParquetWriter(self._sink, self.schema, compression="zstd", compression_level=6)
+            self._open()
         self._writer.write_batch(batch)
         self.total += self.rows
         self.cols = {n: [] for n in self.schema.names}
@@ -113,12 +111,27 @@ class TableWriter:
         """Write remaining rows and move the file into place. An empty table still gets a file (0 rows)."""
         self.flush()
         if self._writer is None:
-            self.root.makedirs(self.path)
-            self._sink = self.root.fs.open_output_stream(self.path + ".tmp")
-            self._writer = pq.ParquetWriter(self._sink, self.schema, compression="zstd", compression_level=6)
+            self._open()
         self._writer.close()
         self._sink.close()
-        if self.root.exists(self.path):
-            self.root.fs.delete_file(self.path)
-        self.root.fs.move(self.path + ".tmp", self.path)
+        if self._staged:
+            if self.root.exists(self.path):
+                self.root.fs.delete_file(self.path)
+            self.root.fs.move(self.path + ".tmp", self.path)
         return self.total
+
+    @property
+    def _staged(self) -> bool:
+        """Local files are written to `.tmp` and renamed, so a crash never leaves a half file in place.
+
+        Object stores (S3) write straight to the final key: a multipart upload only becomes visible when it
+        completes, and a "move" there is a server-side copy plus a delete, which times out on large parts
+        and needs s3:DeleteObject (the instance role deliberately has none).
+        """
+        return self.root.fs.type_name == "local"
+
+    def _open(self) -> None:
+        self.root.makedirs(self.path)
+        target = self.path + ".tmp" if self._staged else self.path
+        self._sink = self.root.fs.open_output_stream(target)
+        self._writer = pq.ParquetWriter(self._sink, self.schema, compression="zstd", compression_level=6)
