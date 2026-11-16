@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import os
 import tempfile
+from array import array
 from bisect import bisect_left, bisect_right
 from collections import Counter, defaultdict
 from dataclasses import dataclass, field
@@ -56,33 +57,65 @@ def _top(book):
     return (bb, bids.get(bb), ba, asks.get(ba))
 
 
-def _apply(book, ev) -> None:
-    action, side, price, size = ev[1], ev[2], ev[3], ev[4]
-    if action != "set":
-        return
-    lv = book[0] if side == "bid" else book[1]
-    if size <= 0:
-        lv.pop(price, None)
-    else:
-        lv[price] = size
+SET, RESET, GAP, OTHER = 0, 1, 2, 3
+_ACTIONS = {"set": SET, "reset": RESET, "gap": GAP}
 
 
-def replay_token(snaps: list[tuple], events: list[tuple], window_ms: int, res: TokenResult) -> None:
-    """snaps: [(t, bids{p:s}, asks{p:s})] sorted by t; events: [(t, action, side, price, size, reset_levels)]
-    in arrival order, reset_levels a pre-built book for `reset` rows."""
-    if not events:
+class Events:
+    """One token's delta events in arrival order, stored as typed columns.
+
+    A busy Kalshi token can have a million deltas in an hour; as Python tuples that alone took ~250 B per event
+    and pushed the nightly job past its 1 GB container cap. Typed arrays take ~34 B per event."""
+    __slots__ = ("t", "act", "bid", "p", "z", "line", "resets")
+
+    def __init__(self) -> None:
+        self.t, self.p, self.z, self.line = array("q"), array("q"), array("q"), array("q")
+        self.act, self.bid = array("b"), array("b")
+        self.resets: dict[int, tuple[dict, dict]] = {}  # event index -> full book of a `reset`
+
+    def __len__(self) -> int:
+        return len(self.t)
+
+    def append(self, t, action, side, price, size, reset_levels=None, line=-1) -> None:
+        if reset_levels is not None:
+            self.resets[len(self.t)] = reset_levels
+        self.t.append(t)
+        self.act.append(_ACTIONS.get(action, OTHER))
+        self.bid.append(1 if side == "bid" else 0)
+        self.p.append(price or 0)
+        self.z.append(size or 0)
+        self.line.append(-1 if line is None else line)
+
+    @classmethod
+    def of(cls, tuples) -> "Events":
+        """From [(t, action, side, price, size, reset_levels[, line])] tuples."""
+        ev = cls()
+        for tup in tuples:
+            ev.append(*tup)
+        return ev
+
+
+def replay_token(snaps: list[tuple], events, window_ms: int, res: TokenResult) -> None:
+    """snaps: [(t, bids{p:s}, asks{p:s}[, source, line])] sorted by t; events: an `Events`, or a list of
+    (t, action, side, price, size, reset_levels[, line]) tuples in arrival order, reset_levels a pre-built book
+    for `reset` rows."""
+    if not isinstance(events, Events):
+        events = Events.of(events)
+    if not len(events):
         res.outcomes["skipped"] += max(0, len(snaps) - 1)
         return
-    runmax = []
-    m = None
-    for ev in events:
-        m = ev[0] if m is None else max(m, ev[0])
+    runmax = array("q")
+    m = events.t[0]
+    for t in events.t:
+        if t > m:
+            m = t
         runmax.append(m)
 
     def boundary(t):  # number of events whose running-max time <= t
         return bisect_right(runmax, t)
 
-    lines = [ev[6] if len(ev) > 6 else -1 for ev in events]
+    lines = events.line
+    act, bid, ps, zs, resets = events.act, events.bid, events.p, events.z, events.resets
 
     for k in range(1, len(snaps)):
         t_prev, t_k = snaps[k - 1][0], snaps[k][0]
@@ -111,14 +144,19 @@ def replay_token(snaps: list[tuple], events: list[tuple], window_ms: int, res: T
                 in_window = True
             if i >= stop:
                 break
-            ev = events[i]
-            if ev[1] == "reset":
-                book = (dict(ev[5][0]), dict(ev[5][1]))
+            a_i = act[i]
+            if a_i == RESET:
+                full = resets[i]
+                book = (dict(full[0]), dict(full[1]))
                 valid = True
-            elif ev[1] == "gap":
+            elif a_i == GAP:
                 valid = False
-            elif valid:
-                _apply(book, ev)
+            elif valid and a_i == SET:
+                lv = book[0] if bid[i] else book[1]
+                if zs[i] <= 0:
+                    lv.pop(ps[i], None)
+                else:
+                    lv[ps[i]] = zs[i]
             i += 1
         if exact:
             res.outcomes["exact"] += 1
@@ -197,7 +235,7 @@ def run(deltas_glob: str | list[str], snapshots_glob: str | list[str], window_ms
         "ORDER BY host, token_id, line, item", params=[deltas_glob])
     # DuckDB 2.x: to_arrow_reader; 1.x: fetch_record_batch
     reader = (rel.to_arrow_reader(100_000) if hasattr(rel, "to_arrow_reader") else rel.fetch_record_batch(100_000))
-    cur_key, cur_events = None, []
+    cur_key, cur_events = None, Events()
     reset_line, reset_book = None, None
 
     def finish(key, events):
@@ -216,24 +254,24 @@ def run(deltas_glob: str | list[str], snapshots_glob: str | list[str], window_ms
                 if cur_key is not None:
                     finish(cur_key, cur_events)
                     seen.add(cur_key)
-                cur_key, cur_events, reset_line, reset_book = key, [], None, None
+                cur_key, cur_events, reset_line, reset_book = key, Events(), None, None
             if action == "reset":
                 reset_book = ({}, {})
                 reset_line = line
-                cur_events.append((t, "reset", None, None, None, reset_book, line))
+                cur_events.append(t, "reset", None, None, None, reset_book, line)
             elif action == "set" and line == reset_line:
                 # levels of the full book that just reset: fill the reset's book instead of separate events
                 if z > 0:
                     (reset_book[0] if side == "bid" else reset_book[1])[p] = z
             else:
                 reset_line = None
-                cur_events.append((t, action, side, p, z, None, line))
+                cur_events.append(t, action, side, p, z, None, line)
     if cur_key is not None:
         finish(cur_key, cur_events)
         seen.add(cur_key)
     for key in snaps:
         if key not in seen:
-            replay_token(snaps[key], [], window_ms, results[key])
+            replay_token(snaps[key], Events(), window_ms, results[key])
 
     total = Counter()
     per_token = []

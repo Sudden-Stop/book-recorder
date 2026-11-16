@@ -64,7 +64,8 @@ def main(argv: list[str] | None = None) -> int:
     n.add_argument("--batch-rows", type=int, default=200_000)
     n.add_argument("--window-ms", type=int, default=2000)
     n.add_argument("--min-match-rate", type=float)
-    n.add_argument("--memory-limit", default="512MB", help="DuckDB cap for validate (container cap is 1 GB)")
+    n.add_argument("--memory-limit", default="256MB",
+                   help="DuckDB cap for validate; it uses ~150 MB on top, and the container cap is 1 GB")
     n.add_argument("--local-host", default="local")
 
     b = sub.add_parser("publish", help="stage curated tables for Hugging Face and optionally push")

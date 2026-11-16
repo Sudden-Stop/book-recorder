@@ -11,11 +11,14 @@ Publishing is not part of the nightly run: it needs the wallet and licence decis
 """
 from __future__ import annotations
 
+import gc
 import json
 import os
 import traceback
 from datetime import datetime, timedelta, timezone
 from typing import Callable
+
+import pyarrow as pa
 
 from . import curate, validate
 from .storage import Root, raw_files
@@ -47,7 +50,7 @@ def recorded_hours(root: Root, venue: str, dt: str, local_host: str = "local") -
 
 def run(root_uri: str, dt: str, venues: tuple[str, ...] = VENUES, hours: list[str] | None = None,
         force: bool = False, batch_rows: int = 200_000, window_ms: int = 2000,
-        min_match_rate: float | None = None, memory_limit: str = "512MB", local_host: str = "local",
+        min_match_rate: float | None = None, memory_limit: str = "256MB", local_host: str = "local",
         log: Callable[[dict], None] = lambda e: print(json.dumps(e, default=str), flush=True)) -> dict:
     root = Root.parse(root_uri)
     summary: dict = {"dt": dt, "root": root_uri, "venues": {}, "failed": [],
@@ -78,6 +81,7 @@ def run(root_uri: str, dt: str, venues: tuple[str, ...] = VENUES, hours: list[st
             if validated and done and not force:
                 continue
             try:
+                _release()  # curate's freed Arrow buffers back to the OS before DuckDB starts
                 rep = validate.run(root_uri, [validate.Hour(venue, dt, h)], window_ms=window_ms,
                                    min_match_rate=min_match_rate, memory_limit=memory_limit)
                 vs["validated"].append(h)
@@ -95,6 +99,13 @@ def run(root_uri: str, dt: str, venues: tuple[str, ...] = VENUES, hours: list[st
     with root.fs.open_output_stream(path) as f:
         f.write(json.dumps(summary, indent=2, default=str).encode())
     return summary
+
+
+def _release() -> None:
+    """Return freed memory to the OS. Arrow's allocator keeps it otherwise, and curate then validate in one
+    process under a 1 GB container cap was enough to get the job OOM-killed."""
+    gc.collect()
+    pa.default_memory_pool().release_unused()
 
 
 def _fail(summary: dict, vs: dict, venue: str, hour: str, step: str, error: str, log) -> None:
