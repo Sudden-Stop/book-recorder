@@ -84,3 +84,15 @@ def test_unit_gap_then_reset():
     assert _run([s0, s1], [gap]) == Counter(skipped=1)
     reset = (3000, "reset", None, None, None, _book([(0.45, 1)], [(0.55, 1)]))
     assert _run([s0, s1], [gap, reset]) == Counter(exact=1)
+
+
+def test_unit_book_emptied_by_venue_is_cleared_not_mismatch():
+    # Kalshi deactivates a market: no deltas remove the resting orders, the next socket snapshot is just empty
+    s0 = (1000, [(0.40, 10)], [(0.60, 10)])
+    empty = (5000, [], [])
+    assert _run([s0, empty], [_set(2000, "bid", 0.41, 5)]) == Counter(cleared=1)
+    # emptied through deltas it is an ordinary exact match
+    assert _run([s0, empty], [_set(2000, "bid", 0.40, 0), _set(2100, "ask", 0.60, 0)]) == Counter(exact=1)
+    # a one-sided snapshot is still compared as usual
+    one_sided = (5000, [(0.40, 10)], [])
+    assert _run([s0, one_sided], [_set(2000, "bid", 0.30, 1)]) == Counter(mismatch=1)

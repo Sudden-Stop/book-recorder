@@ -183,7 +183,7 @@ def render_card(summary: dict, wallets: str, venues: list[str], dts: list[str], 
 
 
 def _replay_text(reports: list[dict]) -> str:
-    tot = {"exact": 0, "window": 0, "top": 0, "mismatch": 0, "skipped": 0}
+    tot = {"exact": 0, "window": 0, "top": 0, "mismatch": 0, "skipped": 0, "cleared": 0}
     hours = 0
     for r in reports:
         rp = r.get("replay")
@@ -198,7 +198,9 @@ def _replay_text(reports: list[dict]) -> str:
     return (f"Over {hours} validated hour(s), {ev:,} snapshot intervals were evaluated: "
             f"{tot['exact']:,} exact ({tot['exact'] / ev:.2%}), {tot['window']:,} within the timing window, "
             f"{tot['top']:,} with only the top of book matching, {tot['mismatch']:,} mismatched; "
-            f"{tot['skipped']:,} intervals were skipped because of connection gaps.")
+            f"{tot['skipped']:,} intervals were skipped because of connection gaps and {tot['cleared']:,} "
+            f"ended in a book the venue emptied without deltas (market deactivated or closed), "
+            f"which are not counted as evaluated.")
 
 
 def _coverage_text(reports: list[dict]) -> str:

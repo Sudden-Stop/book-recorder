@@ -10,12 +10,16 @@ Outcomes per interval:
 - `window`: not exact, but some replayed state within +/- `window_ms` of S[k]'s time equals it (clock skew,
   REST snapshot taken mid-burst);
 - `top`: neither, but best bid/ask prices and sizes agree at the boundary;
+- `cleared`: S[k] is empty on both sides while the replayed book is not. The venue wiped the book without
+  sending deltas for it (Kalshi does this when a market is deactivated or closes: the next socket snapshot is
+  simply empty). The data is right, since S[k] is itself a `reset` in `book_deltas`; there is just nothing
+  to replay against, so these are reported apart and not counted as evaluated;
 - `mismatch`: none of the above;
 - `skipped`: a `gap` row with no later `reset` before the boundary (book unknown), or no delta stream for the
   token on that host.
 
 A `reset` (WebSocket full book) inside an interval replaces the book, as the live feed would.
-Match rate = (exact + window) / evaluated, evaluated = all intervals minus skipped.
+Match rate = (exact + window) / evaluated, evaluated = all intervals minus skipped and cleared.
 """
 from __future__ import annotations
 
@@ -120,6 +124,8 @@ def replay_token(snaps: list[tuple], events: list[tuple], window_ms: int, res: T
             res.outcomes["exact"] += 1
         elif not boundary_valid:
             res.outcomes["skipped"] += 1
+        elif not target[0] and not target[1]:
+            res.outcomes["cleared"] += 1
         elif in_window:
             res.outcomes["window"] += 1
         elif top_ok:
@@ -242,10 +248,10 @@ def run(deltas_glob: str | list[str], snapshots_glob: str | list[str], window_ms
     return {
         "window_ms": window_ms,
         "tokens": len(results),
-        "intervals": evaluated + total["skipped"],
+        "intervals": evaluated + total["skipped"] + total["cleared"],
         "evaluated": evaluated,
         "duplicate_snapshots": total["duplicate_snapshots"],
-        "outcomes": {k: total[k] for k in ("exact", "window", "top", "mismatch", "skipped")},
+        "outcomes": {k: total[k] for k in ("exact", "window", "top", "mismatch", "skipped", "cleared")},
         "exact_rate": total["exact"] / evaluated if evaluated else None,
         "match_rate": (total["exact"] + total["window"]) / evaluated if evaluated else None,
         "per_token": sorted(per_token, key=lambda r: (r["market_id"] or "", r["token_id"])),
