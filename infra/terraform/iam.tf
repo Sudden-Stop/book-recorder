@@ -25,14 +25,16 @@ data "aws_iam_policy_document" "instance" {
     resources = [aws_s3_bucket.data.arn]
   }
 
-  # Recorder: PUT + GET/HEAD on raw/. Pipeline: read raw/, write curated/.
-  # One role serves both containers, so both prefixes get both actions.
+  # Recorder: PUT + GET/HEAD on raw/. Pipeline: read raw/, write curated/ and reports/
+  # (curate, validate and nightly run reports). One role serves both containers, so every
+  # prefix gets both actions. No DeleteObject anywhere.
   statement {
     sid     = "ReadWriteObjects"
     actions = ["s3:PutObject", "s3:GetObject"]
     resources = [
       "${aws_s3_bucket.data.arn}/raw/*",
       "${aws_s3_bucket.data.arn}/curated/*",
+      "${aws_s3_bucket.data.arn}/reports/*",
     ]
   }
 

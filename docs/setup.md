@@ -11,7 +11,7 @@ What gets created:
 | EC2 instance | `t4g.small` (2 vCPU, 2 GB, Graviton), Amazon Linux 2023 arm64, 50 GB gp3 (encrypted), IMDSv2 only, default VPC |
 | Security group | SSH (22) from one CIDR; all egress |
 | S3 bucket | versioning on, public access blocked, TLS only, SSE-S3; `raw/` moves to STANDARD_IA after 30 days; overwritten versions expire after 90 days |
-| IAM role / instance profile | `s3:ListBucket` on the bucket, `s3:GetObject` + `s3:PutObject` on `raw/*` and `curated/*`, `ssm:GetParameter*` under `/book-recorder/*`, `cloudwatch:PutMetricData` restricted to the `BookRecorder` namespace (needed for the alarms) |
+| IAM role / instance profile | `s3:ListBucket` on the bucket, `s3:GetObject` + `s3:PutObject` on `raw/*`, `curated/*` and `reports/*`, `ssm:GetParameter*` under `/book-recorder/*`, `cloudwatch:PutMetricData` restricted to the `BookRecorder` namespace (needed for the alarms) |
 | SSM parameters (SecureString) | `/book-recorder/kalshi/key-id`, `/book-recorder/kalshi/private-key`, `/book-recorder/hf/token`, `/book-recorder/ghcr/token` (optional), created with the placeholder `UNSET` |
 | SNS topic + email subscription | receives the alarms |
 | CloudWatch alarms | health check failed or missing for 5 min; root disk above 80 %; EC2 status check failed |
