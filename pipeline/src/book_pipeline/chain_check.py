@@ -68,7 +68,12 @@ LOGS_RANGE = 40  # initial eth_getLogs block range per RPC
 MARGIN_S = 120  # on-chain fills fetched this far around the window, so activity rows near its edges match
 EDGE_S = 30  # next to a neighbouring hour that is not curated, this much of the window is not counted
 SILENCE_MS = 3000  # a gap this long in the union of the sockets' frames counts as an outage
-MIN_COMPLETENESS_PCT = 99.8  # in-scope fills present, outages aside; below it the check fails
+# Pass / fail. The feed itself loses a steady ~0.08-0.09 % of orders and skips 1-3 whole blocks an hour with a
+# healthy socket (measured on 2026-11-18), which only a chain backfill recovers; failing on that would fail most
+# nights for nothing anyone can act on. So the check fails on what needs action:
+MIN_FEED_PCT = 99.0  # in-scope completeness outside outages below this: the feed is broken, not just lossy
+MAX_OUTAGE_LOSS_PCT = 0.05  # in-scope fills lost while every socket was down: the recorder's redundancy failed
+TARGET_FEED_PCT = 99.8  # below this a warning only (the usual feed loss sits around 99.8-99.9 %)
 
 
 def default_rpcs() -> tuple[str, ...]:
@@ -416,6 +421,7 @@ def reconcile(fills: list[dict], rows: list[dict], t0: int, t1: int, gaps: list[
             "completeness_pct": pct(scope_n - len(scope_missing), scope_n),
             # lost while the recorder was not listening (all sockets down) is not held against the feed
             "completeness_excl_outages_pct": pct(scope_n - len(scope_missing) + scope_outage, scope_n),
+            "outage_loss_pct": pct(scope_outage, scope_n),
         },
         "completeness_by_exchange": {ex: {"fills": n, "missing": miss_by_ex.get(ex, 0),
                                           "pct": pct(n - miss_by_ex.get(ex, 0), n)}
@@ -434,7 +440,8 @@ def reconcile(fills: list[dict], rows: list[dict], t0: int, t1: int, gaps: list[
     }
 
 
-def problems(rep: dict, min_pct: float = MIN_COMPLETENESS_PCT) -> list[str]:
+def problems(rep: dict, min_feed_pct: float = MIN_FEED_PCT,
+             max_outage_loss_pct: float = MAX_OUTAGE_LOSS_PCT) -> list[str]:
     """What makes the check fail; empty when it passes."""
     out = []
     if not rep["onchain_fills"]:
@@ -445,10 +452,19 @@ def problems(rep: dict, min_pct: float = MIN_COMPLETENESS_PCT) -> list[str]:
         out.append(f"{rep['extra_activity_rows']['n']} activity rows without an on-chain fill")
     if rep["price_mismatches"]:
         out.append(f"{rep['price_mismatches']} matched fills with a different price")
-    c = rep["in_scope"]["completeness_excl_outages_pct"]
-    if c is not None and c < min_pct:
-        out.append(f"in-scope completeness outside outages {c}% < {min_pct}%")
+    s = rep["in_scope"]
+    if s["completeness_excl_outages_pct"] is not None and s["completeness_excl_outages_pct"] < min_feed_pct:
+        out.append(f"in-scope completeness outside outages {s['completeness_excl_outages_pct']}% < {min_feed_pct}%")
+    if s["outage_loss_pct"] is not None and s["outage_loss_pct"] > max_outage_loss_pct:
+        out.append(f"{s['missing_in_outages']} in-scope fills ({s['outage_loss_pct']}%) lost while every activity "
+                   f"socket was down > {max_outage_loss_pct}%")
     return out
+
+
+def warnings(rep: dict, target_pct: float = TARGET_FEED_PCT) -> list[str]:
+    """Reported, not failing: feed losses the recorder cannot prevent (a chain backfill recovers them)."""
+    c = rep["in_scope"]["completeness_excl_outages_pct"]
+    return [f"in-scope completeness outside outages {c}% < {target_pct}%"] if c is not None and c < target_pct else []
 
 
 def report_path(root: Root, dt: str, hour: str) -> str:
@@ -456,7 +472,8 @@ def report_path(root: Root, dt: str, hour: str) -> str:
 
 
 def run(root_uri: str, dt: str, hours: list[str], cache: str | None = None, rpcs=None,
-        min_pct: float = MIN_COMPLETENESS_PCT, write: bool = False) -> dict:
+        min_feed_pct: float = MIN_FEED_PCT, max_outage_loss_pct: float = MAX_OUTAGE_LOSS_PCT,
+        write: bool = False) -> dict:
     hours = sorted(f"{int(h):02d}" for h in hours)
     root = Root.parse(root_uri)
     t0 = int(datetime.strptime(f"{dt} {hours[0]}", "%Y-%m-%d %H").replace(tzinfo=timezone.utc).timestamp())
@@ -469,7 +486,9 @@ def run(root_uri: str, dt: str, hours: list[str], cache: str | None = None, rpcs
         t0 += EDGE_S
     if f"{around[-1][0]}T{around[-1][1]}" in missing_parts:
         t1 -= EDGE_S
-    gaps = [g for g in outages(root, hour_list(dt, hours, pad=0))
+    # the neighbouring hours too: a silence that starts before the window (or ends after it) has its other end
+    # there, and reading only the window's own frames would not see it
+    gaps = [g for g in outages(root, around)
             if g["to_ms"] >= t0 * 1000 and g["from_ms"] < t1 * 1000]
     rep = {"venue": "polymarket", "dt": dt, "hours": hours, "window_s": [t0, t1], "fetch": info,
            "curated_parts_missing": missing_parts,
@@ -477,7 +496,8 @@ def run(root_uri: str, dt: str, hours: list[str], cache: str | None = None, rpcs
            **reconcile(fills, rows, t0, t1, gaps),
            "outages": gaps,
            "checked_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
-    rep["problems"] = problems(rep, min_pct)
+    rep["problems"] = problems(rep, min_feed_pct, max_outage_loss_pct)
+    rep["warnings"] = warnings(rep)
     rep["ok"] = not rep["problems"]
     if write:
         path = report_path(root, dt, hours[0] if len(hours) == 1 else f"{hours[0]}-{hours[-1]}")
@@ -495,15 +515,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--hour", required=True, action="append", help="UTC hour; repeat for a contiguous window")
     p.add_argument("--cache", help="directory caching on-chain logs between runs")
     p.add_argument("--rpc", action="append", help=f"Polygon RPC URL (default: ${RPC_ENV}, then public RPCs)")
-    p.add_argument("--min-completeness", type=float, default=MIN_COMPLETENESS_PCT)
+    p.add_argument("--min-feed-pct", type=float, default=MIN_FEED_PCT,
+                   help="fail when in-scope completeness outside outages is below this")
+    p.add_argument("--max-outage-loss-pct", type=float, default=MAX_OUTAGE_LOSS_PCT,
+                   help="fail when more than this share of in-scope fills fell in recorder outages")
     p.add_argument("--out", help="write the JSON report to this file")
     p.add_argument("--write-report", action="store_true", help="write it under <root>/reports/chain/")
     a = p.parse_args(argv)
-    rep = run(a.root, a.dt, a.hour, a.cache, tuple(a.rpc) if a.rpc else None, a.min_completeness,
-              write=a.write_report)
+    rep = run(a.root, a.dt, a.hour, a.cache, tuple(a.rpc) if a.rpc else None, a.min_feed_pct,
+              a.max_outage_loss_pct, write=a.write_report)
     if a.out:
         Path(a.out).write_text(json.dumps(rep, indent=2, default=str))
-    print(json.dumps({k: rep[k] for k in ("ok", "problems", "onchain_fills", "completeness_pct", "in_scope")},
+    print(json.dumps({k: rep[k] for k in ("ok", "problems", "warnings", "onchain_fills", "completeness_pct",
+                                          "in_scope")},
                      default=str))
     return 0 if rep["ok"] else 1
 

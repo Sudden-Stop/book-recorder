@@ -1,2 +1,6 @@
 # Auto detect text files and perform LF normalization
 * text=auto
+# Copied as-is to the Linux host (scp): keep LF even in a Windows checkout with core.autocrlf, or the shebang
+# reads `/bin/bash\r` and systemd fails with 203/EXEC "No such file or directory".
+*.sh text eol=lf
+deploy/** text eol=lf

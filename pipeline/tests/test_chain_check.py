@@ -113,3 +113,44 @@ def test_nightly_runs_the_chain_check_only_when_an_rpc_is_set(tmp_path, monkeypa
     s = nightly.run(str(root), DT, venues=("polymarket",), log=lambda e: None)
     assert calls == [(DT, [HOUR])]
     assert not s["ok"] and s["failed"][0]["step"] == "chain"
+
+
+def test_outage_spanning_the_hour_boundary_is_seen_from_both_hours(tmp_path):
+    import json as _json
+
+    def write(hour, recs):
+        d = tmp_path / "raw" / "venue=polymarket" / "stream=activity" / "dt=2026-11-18" / f"hour={hour}"
+        d.mkdir(parents=True)
+        import zstandard
+
+        data = "".join(_json.dumps(r) + "\n" for r in recs).encode()
+        (d / "rec-a-p0.ndjson.zst").write_bytes(zstandard.ZstdCompressor().compress(data))
+
+    h18 = 1_795_024_800_000  # 2026-11-18 18:00:00 UTC
+    frame = {"msg": {"type": "trades", "payload": {}}}
+    write("17", [{"recv_ms": h18 - 5_000, "conn": 1, **frame}])
+    write("18", [{"recv_ms": h18 + 10_600, "conn": 1, "ctl": "disconnect", "reason": "stalled"},
+                 {"recv_ms": h18 + 12_000, "conn": 2, **frame}])
+    root = cc.Root.parse(str(tmp_path))
+    assert cc.outages(root, [("2026-11-18", "18")]) == []  # one hour alone cannot see it
+    gaps = cc.outages(root, cc.hour_list("2026-11-18", ["18"], pad=1))
+    assert [(g["from_ms"], g["to_ms"], g["disconnects"]) for g in gaps] == [(h18 - 5_000, h18 + 12_000, ["stalled"])]
+
+
+def _scope_rep(pct, outage_pct, missing_in_outages=0):
+    return {"onchain_fills": 1000, "unknown_exchanges": [], "extra_activity_rows": {"n": 0}, "price_mismatches": 0,
+            "in_scope": {"completeness_excl_outages_pct": pct, "outage_loss_pct": outage_pct,
+                         "missing_in_outages": missing_in_outages}}
+
+
+def test_usual_feed_loss_warns_but_passes():
+    rep = _scope_rep(99.52, 0.0)
+    assert cc.problems(rep) == []
+    assert cc.warnings(rep)
+    assert cc.warnings(_scope_rep(99.9, 0.0)) == []
+
+
+def test_broken_feed_or_failed_redundancy_fails():
+    assert any("completeness" in p for p in cc.problems(_scope_rep(98.5, 0.0)))
+    assert any("socket was down" in p for p in cc.problems(_scope_rep(99.9, 1.4, 1951)))
+    assert cc.problems(_scope_rep(99.9, 0.04, 50)) == []

@@ -8,7 +8,10 @@ crash resumes where it stopped. A failing hour is recorded and the run moves on;
 CLI exits 1.
 
 Polymarket hours are then checked against the chain (`chain_check`: every on-chain fill should be in the
-`activity` feed) when `POLYGON_RPC_URL` is set, writing `reports/chain/`. A failed check counts as a failed hour.
+`activity` feed) when `POLYGON_RPC_URL` is set, writing `reports/chain/`. A failed check counts as a failed hour:
+activity rows or prices that disagree with the chain, an unknown exchange, more than 0.05 % of fills lost while
+every socket was down, or the feed below 99 % outside outages. The feed's usual loss (~0.1-0.3 %: dropped orders
+and skipped blocks) is a warning only (`chain_check.problems` / `warnings`).
 
 Publishing is not part of the nightly run: it needs the wallet and licence decisions (`book-pipeline publish`).
 """
@@ -127,7 +130,7 @@ def _chain(root: Root, root_uri: str, dt: str, hours: list[str], vs: dict, summa
             _fail(summary, vs, "polymarket", h, "chain", f"{type(e).__name__}: {e}", log)
             continue
         vs["chain_checked"].append(h)
-        log({"step": "chain", "venue": "polymarket", "hour": h, "ok": rep["ok"],
+        log({"step": "chain", "venue": "polymarket", "hour": h, "ok": rep["ok"], "warnings": rep.get("warnings"),
              "in_scope": rep["in_scope"], "missing_by_cause": rep["missing"]["by_cause"]})
         if not rep["ok"]:
             _fail(summary, vs, "polymarket", h, "chain", "; ".join(rep["problems"]), log)
