@@ -7,6 +7,9 @@ size) and then validated. An hour that already has a curate report is skipped un
 crash resumes where it stopped. A failing hour is recorded and the run moves on; the summary lists it and the
 CLI exits 1.
 
+Polymarket hours are then checked against the chain (`chain_check`: every on-chain fill should be in the
+`activity` feed) when `POLYGON_RPC_URL` is set, writing `reports/chain/`. A failed check counts as a failed hour.
+
 Publishing is not part of the nightly run: it needs the wallet and licence decisions (`book-pipeline publish`).
 """
 from __future__ import annotations
@@ -20,7 +23,7 @@ from typing import Callable
 
 import pyarrow as pa
 
-from . import curate, validate
+from . import chain_check, curate, validate
 from .storage import Root, raw_files
 from .venues import PARSERS
 
@@ -51,7 +54,7 @@ def recorded_hours(root: Root, venue: str, dt: str, local_host: str = "local") -
 def run(root_uri: str, dt: str, venues: tuple[str, ...] = VENUES, hours: list[str] | None = None,
         force: bool = False, batch_rows: int = 200_000, window_ms: int = 2000,
         min_match_rate: float | None = None, memory_limit: str = "256MB", local_host: str = "local",
-        log: Callable[[dict], None] = lambda e: print(json.dumps(e, default=str), flush=True)) -> dict:
+        chain: bool | None = None, log: Callable[[dict], None] = lambda e: print(json.dumps(e, default=str), flush=True)) -> dict:
     root = Root.parse(root_uri)
     summary: dict = {"dt": dt, "root": root_uri, "venues": {}, "failed": [],
                      "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
@@ -92,6 +95,8 @@ def run(root_uri: str, dt: str, venues: tuple[str, ...] = VENUES, hours: list[st
                 _fail(summary, vs, venue, h, "validate", "; ".join(e.problems), log)
             except Exception as e:
                 _fail(summary, vs, venue, h, "validate", f"{type(e).__name__}: {e}", log)
+        if venue == "polymarket" and _chain_enabled(chain):
+            _chain(root, root_uri, dt, todo, vs, summary, force, log)
     summary["ok"] = not summary["failed"]
     summary["finished_at"] = datetime.now(timezone.utc).isoformat(timespec="seconds")
     path = root.join("reports", "nightly", f"dt={dt}.json")
@@ -99,6 +104,33 @@ def run(root_uri: str, dt: str, venues: tuple[str, ...] = VENUES, hours: list[st
     with root.fs.open_output_stream(path) as f:
         f.write(json.dumps(summary, indent=2, default=str).encode())
     return summary
+
+
+def _chain_enabled(chain: bool | None) -> bool:
+    """`None` (the default): on when a Polygon RPC is configured. The public RPCs are too flaky for 24 hours."""
+    return bool(os.environ.get(chain_check.RPC_ENV)) if chain is None else chain
+
+
+def _chain(root: Root, root_uri: str, dt: str, hours: list[str], vs: dict, summary: dict, force: bool,
+           log) -> None:
+    """Completeness of the activity feed against on-chain fills, for every curated hour."""
+    vs["chain_checked"] = []
+    for h in hours:
+        if not root.exists(curate.report_path(root, "curate", "polymarket", dt, h)):
+            continue
+        if root.exists(chain_check.report_path(root, dt, h)) and not force:
+            continue
+        try:
+            _release()
+            rep = chain_check.run(root_uri, dt, [h], write=True)
+        except Exception as e:  # an RPC outage must not hide the other hours
+            _fail(summary, vs, "polymarket", h, "chain", f"{type(e).__name__}: {e}", log)
+            continue
+        vs["chain_checked"].append(h)
+        log({"step": "chain", "venue": "polymarket", "hour": h, "ok": rep["ok"],
+             "in_scope": rep["in_scope"], "missing_by_cause": rep["missing"]["by_cause"]})
+        if not rep["ok"]:
+            _fail(summary, vs, "polymarket", h, "chain", "; ".join(rep["problems"]), log)
 
 
 def _release() -> None:

@@ -42,7 +42,7 @@ def main(argv: list[str] | None = None) -> int:
     c.add_argument("--batch-rows", type=int, default=200_000)
     c.add_argument("--local-host", default="local",
                    help="host name for files in the recorder's local data-dir layout (no host in the name)")
-    c.add_argument("--no-warm", action="store_true", help="Kalshi: do not read the previous hour to seed books")
+    c.add_argument("--no-warm", action="store_true", help="do not read the previous hour (Kalshi books, Polymarket activity dedup)")
 
     v = sub.add_parser("validate", help="schema drift, replay match and coverage")
     v.add_argument("--curated", required=True)
@@ -67,6 +67,8 @@ def main(argv: list[str] | None = None) -> int:
     n.add_argument("--memory-limit", default="256MB",
                    help="DuckDB cap for validate; it uses ~150 MB on top, and the container cap is 1 GB")
     n.add_argument("--local-host", default="local")
+    n.add_argument("--chain", action=argparse.BooleanOptionalAction, default=None,
+                   help="check Polymarket activity against on-chain fills (default: on when POLYGON_RPC_URL is set)")
 
     b = sub.add_parser("publish", help="stage curated tables for Hugging Face and optionally push")
     b.add_argument("--curated", required=True)
@@ -108,7 +110,7 @@ def main(argv: list[str] | None = None) -> int:
                               venues=tuple(args.venue) if args.venue else nightly.VENUES, hours=args.hour,
                               force=args.force, batch_rows=args.batch_rows, window_ms=args.window_ms,
                               min_match_rate=args.min_match_rate, memory_limit=args.memory_limit,
-                              local_host=args.local_host)
+                              local_host=args.local_host, chain=args.chain)
         print(json.dumps({"dt": summary["dt"], "ok": summary["ok"], "failed": summary["failed"]}))
         return 0 if summary["ok"] else 1
     if args.cmd == "publish":

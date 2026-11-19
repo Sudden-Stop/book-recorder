@@ -112,3 +112,70 @@ async fn records_frames_and_reconnects_after_a_drop() {
     assert_eq!(rest[6]["reason"], "shutdown");
     assert_eq!(segment.lines, Some(8));
 }
+
+/// A protocol whose server never answers pings, with a short stall timeout.
+struct Silent {
+    url: String,
+}
+
+impl book_recorder::ws::Protocol for Silent {
+    fn venue(&self) -> &'static str {
+        "test"
+    }
+    fn stream(&self) -> &'static str {
+        "silent"
+    }
+    fn url(&self) -> String {
+        self.url.clone()
+    }
+    fn on_open(&self, _ids: &[String]) -> Vec<String> {
+        vec!["hello".to_string()]
+    }
+    fn subscribe(&self, _ids: &[String]) -> Vec<String> {
+        Vec::new()
+    }
+    fn unsubscribe(&self, _ids: &[String]) -> Vec<String> {
+        Vec::new()
+    }
+    fn app_ping(&self) -> Option<&'static str> {
+        Some("ping")
+    }
+    fn ping_interval(&self) -> Duration {
+        Duration::from_secs(60)
+    }
+    fn stall_after(&self) -> Duration {
+        Duration::from_millis(1_500)
+    }
+}
+
+#[tokio::test]
+async fn a_silent_socket_is_replaced_after_stall_after() {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let (accepted_tx, mut accepted_rx) = mpsc::unbounded_channel::<tokio::time::Instant>();
+    tokio::spawn(async move {
+        let mut held = Vec::new();
+        loop {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            accepted_tx.send(tokio::time::Instant::now()).unwrap();
+            ws.send(Message::Text(r#"{"type":"trades"}"#.into())).await.unwrap();
+            held.push(ws); // open but silent from now on: a half-open socket as seen by the client
+        }
+    });
+
+    let dir = tempfile::tempdir().unwrap();
+    let (segments_tx, _segments_rx) = mpsc::unbounded_channel();
+    let sink = Arc::new(Sink::new(dir.path(), Arc::new(Health::new()), segments_tx));
+    let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let task = tokio::spawn(run_connection(Arc::new(Silent { url }), sink, Arc::new(AtomicU64::new(0)), cmd_rx, Vec::new(), stop_rx));
+
+    let first = tokio::time::timeout(Duration::from_secs(5), accepted_rx.recv()).await.unwrap().unwrap();
+    let second = tokio::time::timeout(Duration::from_secs(6), accepted_rx.recv()).await.unwrap().unwrap();
+    let took = second - first;
+    // Declared stalled 1.5-2.5 s after the last frame (1 s watchdog), then a sub-second backoff.
+    assert!(took >= Duration::from_millis(1_500) && took < Duration::from_millis(4_000), "reconnected after {took:?}");
+    stop_tx.send(true).unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+}

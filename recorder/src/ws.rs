@@ -22,6 +22,8 @@ use tokio_tungstenite::tungstenite::Message;
 
 const RECONNECT_BASE_MS: u64 = 500;
 const RECONNECT_MAX_MS: u64 = 10_000;
+/// How often a connection checks itself for a stall.
+const WATCHDOG: Duration = Duration::from_secs(1);
 
 /// What a venue wants done after seeing one of its frames.
 #[derive(Debug, Default, PartialEq)]
@@ -55,6 +57,11 @@ pub trait Protocol: Send + Sync + 'static {
     }
     fn ping_interval(&self) -> Duration {
         Duration::from_secs(10)
+    }
+    /// Silence (no frame of any kind, pongs included) after which the socket is taken as
+    /// half-open and replaced. Checked once a second.
+    fn stall_after(&self) -> Duration {
+        self.ping_interval() * 3
     }
     /// Called for every text frame before it is recorded. `conn` identifies the connection.
     fn inspect(&self, _conn: u64, _raw: &str) -> Reaction {
@@ -132,6 +139,9 @@ pub async fn run_connection<P: Protocol>(
         let interval = proto.ping_interval();
         let mut ping = tokio::time::interval(interval);
         ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        let stall_after = proto.stall_after();
+        let mut watchdog = tokio::time::interval(WATCHDOG);
+        watchdog.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         let mut last_frame = tokio::time::Instant::now();
         let mut reason = serde_json::Value::Null;
         let mut code: Option<u16> = None;
@@ -202,12 +212,14 @@ pub async fn run_connection<P: Protocol>(
                         sink.control(venue, stream, now_ms(), conn, ctl, json!({ "assets": changed }));
                     }
                 }
-                _ = ping.tick() => {
-                    // Nothing at all (not even a pong) for three intervals: assume a half-open socket.
-                    if last_frame.elapsed() > interval * 3 {
+                _ = watchdog.tick() => {
+                    // Nothing at all (not even a pong) for too long: assume a half-open socket.
+                    if last_frame.elapsed() > stall_after {
                         reason = json!("stalled");
                         break;
                     }
+                }
+                _ = ping.tick() => {
                     let message = match proto.app_ping() {
                         Some(text) => Message::Text(text.into()),
                         None => Message::Ping(Vec::new().into()),

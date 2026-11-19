@@ -24,6 +24,7 @@ chmod 0700 "$dir/secrets"
 kalshi_id=$(get kalshi/key-id)
 kalshi_key=$(get kalshi/private-key)
 hf_token=$(get hf/token)
+polygon_rpc=$(get polygon/rpc-url)
 ghcr_token=$(get ghcr/token)
 
 rec_env="$dir/recorder.secrets.env.tmp"
@@ -50,6 +51,11 @@ if is_set "$hf_token"; then
   echo "HF_TOKEN=$hf_token" >> "$pipe_env"
 else
   echo "fetch-secrets: Hugging Face token not set; publish step will be unavailable"
+fi
+if is_set "$polygon_rpc"; then
+  echo "POLYGON_RPC_URL=$polygon_rpc" >> "$pipe_env"
+else
+  echo "fetch-secrets: Polygon RPC URL not set; nightly on-chain check of the activity feed is off"
 fi
 mv "$pipe_env" "$dir/pipeline.secrets.env"
 

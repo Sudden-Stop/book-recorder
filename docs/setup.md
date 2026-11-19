@@ -12,7 +12,7 @@ What gets created:
 | Security group | SSH (22) from one CIDR; all egress |
 | S3 bucket | versioning on, public access blocked, TLS only, SSE-S3; `raw/` moves to STANDARD_IA after 30 days; overwritten versions expire after 90 days |
 | IAM role / instance profile | `s3:ListBucket` on the bucket, `s3:GetObject` + `s3:PutObject` on `raw/*`, `curated/*` and `reports/*`, `ssm:GetParameter*` under `/book-recorder/*`, `cloudwatch:PutMetricData` restricted to the `BookRecorder` namespace (needed for the alarms) |
-| SSM parameters (SecureString) | `/book-recorder/kalshi/key-id`, `/book-recorder/kalshi/private-key`, `/book-recorder/hf/token`, `/book-recorder/ghcr/token` (optional), created with the placeholder `UNSET` |
+| SSM parameters (SecureString) | `/book-recorder/kalshi/key-id`, `/book-recorder/kalshi/private-key`, `/book-recorder/hf/token`, `/book-recorder/polygon/rpc-url` (optional), `/book-recorder/ghcr/token` (optional), created with the placeholder `UNSET` |
 | SNS topic + email subscription | receives the alarms |
 | CloudWatch alarms | health check failed or missing for 5 min; root disk above 80 %; EC2 status check failed |
 
@@ -113,6 +113,15 @@ Hugging Face token (write access to the private dataset repo):
 
 ```bash
 aws ssm put-parameter --region <region> --overwrite --type SecureString --name /book-recorder/hf/token --value file://hf-token.txt
+```
+
+Polygon RPC URL with its key (for example an Alchemy `https://polygon-mainnet.g.alchemy.com/v2/<key>`). With it
+the nightly run checks every Polymarket hour of the `activity` feed against the on-chain fills
+(`reports/chain/`, see `pipeline/src/book_pipeline/chain_check.py`). Without it that check is off. Alchemy's free
+plan is enough (10-block `eth_getLogs` ranges; about 4,300 calls a day, some 8M of its 30M monthly compute units):
+
+```bash
+aws ssm put-parameter --region <region> --overwrite --type SecureString --name /book-recorder/polygon/rpc-url --value file://polygon-rpc.txt
 ```
 
 Only if the GHCR images are private:

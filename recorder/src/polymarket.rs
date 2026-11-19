@@ -76,7 +76,12 @@ impl Protocol for ActivityProto {
         Some("ping")
     }
     fn ping_interval(&self) -> Duration {
-        Duration::from_secs(5)
+        Duration::from_secs(2)
+    }
+    /// A live socket carries trades every block (~2 s) and a pong every 2 s; the longest
+    /// healthy gap seen in a day of data was 5.2 s. Six seconds of nothing is a dead socket.
+    fn stall_after(&self) -> Duration {
+        Duration::from_secs(6)
     }
     fn inspect(&self, _conn: u64, raw: &str) -> Reaction {
         let t = raw.trim();
@@ -330,6 +335,7 @@ mod tests {
             market_ws_url: String::new(),
             live_ws_url: String::new(),
             activity_enabled: false,
+            activity_connections: 1,
             selection: crate::config::SelectionConfig { top_n: 1, fee_free_max: 0, fee_free_min_volume: 0.0, sample_n: 0, sample_min_volume: 0.0 },
             paired_max: 0,
             max_pages,

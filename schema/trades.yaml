@@ -3,6 +3,7 @@ description: >-
   Trades from two kinds of source: the market-data WebSocket (`market_ws`: Polymarket `last_trade_price`, Kalshi
   `trade`), which has the taker side but no wallet, and Polymarket's global activity feed (`activity`), which has
   the wallet of one side of the fill. The same fill can appear once per source; there is no cross-source dedup.
+  Within `activity`, the copies delivered by the recorder's parallel sockets are reduced to one.
 order: [host, line, item]
 columns:
   - name: venue

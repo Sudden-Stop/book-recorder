@@ -39,6 +39,10 @@ pub struct PolymarketConfig {
     pub market_ws_url: String,
     pub live_ws_url: String,
     pub activity_enabled: bool,
+    /// Parallel `activity` sockets. Each one drops out for a few seconds when the venue
+    /// silently stalls it; with two or more, a trade is lost only if all of them are down
+    /// at once. The pipeline keeps one copy of each fill.
+    pub activity_connections: usize,
     pub selection: SelectionConfig,
     /// Game markets whose event also trades on Kalshi, taken first.
     pub paired_max: usize,
@@ -137,6 +141,7 @@ impl Config {
                 )?,
                 live_ws_url: get("BR_POLYMARKET_LIVE_WS_URL", "wss://ws-live-data.polymarket.com".to_string())?,
                 activity_enabled: flag("BR_POLYMARKET_ACTIVITY_ENABLED", true)?,
+                activity_connections: get::<usize>("BR_POLYMARKET_ACTIVITY_CONNECTIONS", 2)?.max(1),
                 selection: SelectionConfig {
                     top_n: get("BR_POLYMARKET_TOP_N", 100)?,
                     fee_free_max: get("BR_POLYMARKET_FEE_FREE_MAX", 120)?,

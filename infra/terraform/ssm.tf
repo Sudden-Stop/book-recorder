@@ -11,6 +11,7 @@ locals {
     "kalshi/key-id"      = "Kalshi API key id (BR_KALSHI_KEY_ID)."
     "kalshi/private-key" = "Kalshi RSA private key, PEM (written to a file for BR_KALSHI_PRIVATE_KEY_FILE)."
     "hf/token"           = "Hugging Face write token for the private dataset (HF_TOKEN)."
+    "polygon/rpc-url"    = "Polygon RPC URL with its API key (POLYGON_RPC_URL): nightly check of the activity feed against on-chain fills."
     "ghcr/token"         = "Optional: GitHub token with read:packages, only needed while the GHCR images are private."
   }
 }

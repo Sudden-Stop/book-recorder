@@ -110,10 +110,17 @@ async fn polymarket_task(
     tokio::spawn(polymarket::snapshot_loop(http.clone(), cfg.clone(), sink.clone(), tokens_rx, shutdown.clone()));
     if cfg.activity_enabled {
         let activity = Arc::new(polymarket::ActivityProto { url: cfg.live_ws_url.clone() });
-        let (_tx, rx) = tokio::sync::mpsc::unbounded_channel();
-        tokio::spawn(book_recorder::ws::run_connection(activity, sink.clone(), conn_ids.clone(), rx, Vec::new(), shutdown.clone()));
-        // Keep the command sender alive for the life of the task.
-        std::mem::forget(_tx);
+        for i in 0..cfg.activity_connections {
+            let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+            // Keep the command sender alive for the life of the task.
+            std::mem::forget(tx);
+            let (activity, sink, conn_ids, shutdown) = (activity.clone(), sink.clone(), conn_ids.clone(), shutdown.clone());
+            tokio::spawn(async move {
+                // Staggered starts, so the sockets do not open (and age) in lockstep.
+                tokio::time::sleep(Duration::from_millis(1_500 * i as u64)).await;
+                book_recorder::ws::run_connection(activity, sink, conn_ids, rx, Vec::new(), shutdown).await;
+            });
+        }
     }
 
     let mut tracked = Tracked::new(grace_ms);

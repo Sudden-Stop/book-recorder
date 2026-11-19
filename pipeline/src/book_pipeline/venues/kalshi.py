@@ -32,6 +32,8 @@ from .common import Out, as_float, as_int, dumps, first, iso_ms, text, to_ms
 
 VENUE = "kalshi"
 UNVERIFIED = True  # shapes from the recorder's code, not yet from recorded data
+# previous-hour stream -> handler, read first to seed state (see curate)
+WARM = (("book_events", "warm"),)
 STREAMS = (("series", "series"), ("markets", "markets"), ("universe", "universe"), ("book_events", "book_event"))
 TABLES = ("book_deltas", "book_snapshots", "trades", "markets", "coverage")
 ONE = Decimal(1)

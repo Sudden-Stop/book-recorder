@@ -9,8 +9,10 @@ Raw input: the S3 layout `raw/venue=<v>/stream=<s>/dt=…/hour=HH/<host>-pN.ndjs
 data directory `{venue}/{stream}/dt=…/HH.pN.ndjson.zst` (attributed to host `local_host`). Every part of the
 hour is read; a part cut short by a crash yields its complete lines.
 
-Venues with a `warm` handler (Kalshi, whose deltas are relative) first replay the previous hour's
-`book_events` to know each book at the start of the hour.
+Venues with `WARM` handlers first read streams of the previous hour without writing rows: Kalshi replays
+`book_events` (its deltas are relative) to know each book at the start of the hour, Polymarket reads the tail of
+`activity` so fills whose copies straddle the hour boundary are kept once. A parser's `finish` runs after the
+last stream.
 """
 from __future__ import annotations
 
@@ -60,18 +62,22 @@ def run(raw: str, out_root: str, venue: str, dt: str, hour: str, batch_rows: int
     out = Out(venue=venue, writers=writers, coverage=CoverageTracker(venue, h0))
     ROUNDED["count"] = 0
     read: dict[str, dict] = {}
-    if warm and hasattr(parser, "warm"):
-        st = ReadStats()
+    if warm:
         pdt, ph = previous_hour(dt, hour)
-        for ln in iter_raw(src, venue, "book_events", pdt, ph, st, local_host):
-            parser.warm(ln, out)
-        read["warm:book_events"] = asdict(st)
+        for stream, fn in getattr(parser, "WARM", ()):
+            st = ReadStats()
+            handler = getattr(parser, fn)
+            for ln in iter_raw(src, venue, stream, pdt, ph, st, local_host):
+                handler(ln, out)
+            read[f"warm:{stream}"] = asdict(st)
     for stream, fn in parser.STREAMS:
         st = ReadStats()
         handler = getattr(parser, fn)
         for ln in iter_raw(src, venue, stream, dt, hour, st, local_host):
             handler(ln, out)
         read[stream] = asdict(st)
+    if hasattr(parser, "finish"):
+        parser.finish(out)
     counts = {t: w.close() for t, w in writers.items()}
     if "coverage" in parser.TABLES:
         cov = TableWriter(tables["coverage"], dst, curated_path(dst, "coverage", venue, dt, hour))

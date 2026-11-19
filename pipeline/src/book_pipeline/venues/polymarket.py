@@ -10,7 +10,8 @@ Frame semantics follow `data-ingestion/apps/book-compact/src/flatten-events.ts` 
   event without `event_type` but with `bids` is a `book`. A `payload` wrapper is unwrapped.
 - REST book (`book_snapshots`): `GET /book` (one object) or `POST /books` (a list) as received.
 - activity feed (`activity`): `{"type":"trades","topic":"activity","payload":{…}}`; `payload.timestamp` is in
-  seconds, prices and sizes are binary floats.
+  seconds, prices and sizes are binary floats. The recorder keeps several sockets open on it, so each fill
+  arrives once per live socket; one copy is kept (see `_Fills`).
 - `markets`: Gamma market records (a list, or `{"markets": [...]}` / `{"data": [...]}`, or one record).
 - `universe`: the recorder's selection records (`top` or `markets` list of `{rank, conditionId, slug, tokens…}`).
 """
@@ -22,6 +23,9 @@ from .common import (Out, as_bool, as_float, as_int, as_list, dumps, first, iso_
 
 VENUE = "polymarket"
 # stream -> handler, in processing order (metadata first: it maps tokens to markets)
+# previous-hour stream -> handler: the tail of the last hour's activity, so a fill whose copies straddle the
+# hour boundary is not kept twice
+WARM = (("activity", "warm_activity"),)
 STREAMS = (("markets", "markets"), ("universe", "universe"), ("book_events", "book_event"),
            ("book_snapshots", "snapshot"), ("activity", "activity"))
 TABLES = ("book_deltas", "book_snapshots", "trades", "markets", "coverage")
@@ -209,19 +213,96 @@ def snapshot(ln: RawLine, out: Out) -> None:
 
 # --- activity ------------------------------------------------------------------------------------------------
 
+# How far back into the previous hour `warm_activity` looks. Copies of one fill reach the sockets within
+# milliseconds of each other; a minute is a wide margin.
+ACTIVITY_WARM_MS = 60_000
+
+
+class _Fills:
+    """Keeps one copy of each fill across parallel activity sockets.
+
+    A fill is identified by every field the feed gives it. The same identity can legitimately repeat on one
+    socket (identical fills in one transaction), so copies are counted per socket and a fill is kept as many
+    times as the socket that saw it most often: the multiset union of the sockets, never their sum.
+    """
+
+    def __init__(self) -> None:
+        self.kept: dict[tuple, int] = {}
+        self.seen: dict[tuple, dict[tuple, int]] = {}
+        self.this_hour: set[tuple] = set()  # keys received this hour (not only in the warmed tail)
+
+    def add(self, key: tuple, conn: tuple, warm: bool = False) -> bool:
+        """Registers one copy from `conn`; True when it is new (kept), False when a duplicate."""
+        if not warm:
+            self.this_hour.add(key)
+        by_conn = self.seen.setdefault(key, {})
+        n = by_conn.get(conn, 0) + 1
+        by_conn[conn] = n
+        if n > self.kept.get(key, 0):
+            self.kept[key] = n
+            return True
+        return False
+
+
+def _fills(out: Out) -> _Fills:
+    st = getattr(out, "_activity_fills", None)
+    if st is None:
+        st = _Fills()
+        out._activity_fills = st
+    return st
+
+
+def _trade(rec: dict, out: Out | None = None) -> dict | None:
+    frame = frame_of(rec)
+    if not isinstance(frame, dict):
+        if out is not None:
+            out.stats["activity.unparsed"] += 1
+        return None
+    kind = frame.get("type")
+    p = frame.get("payload")
+    if kind != "trades" or not isinstance(p, dict):
+        if out is not None:
+            out.unknown_event_types[f"activity:{kind}"] += 1
+        return None
+    return p
+
+
+def _fill_key(p: dict) -> tuple:
+    wallet = p.get("proxyWallet")
+    return (p.get("transactionHash"), p.get("asset"), wallet.lower() if isinstance(wallet, str) else wallet,
+            p.get("side"), p.get("size"), p.get("price"), p.get("fee"), p.get("timestamp"), p.get("outcomeIndex"))
+
+
+def warm_activity(ln: RawLine, out: Out) -> None:
+    """Previous hour: register the fills of its last minute, as kept, so this hour drops their late copies."""
+    rec = ln.rec
+    if rec.get("ctl") or (as_int(rec.get("recv_ms")) or 0) < out.coverage.h0 - ACTIVITY_WARM_MS:
+        return
+    p = _trade(rec)
+    if p is not None:
+        _fills(out).add(_fill_key(p), (ln.host, as_int(rec.get("conn"))), warm=True)
+
+
+def finish(out: Out) -> None:
+    """Redundancy stats: how many fills only one socket delivered (lost had that socket been down)."""
+    fills = getattr(out, "_activity_fills", None)
+    if fills is None:
+        return
+    hour = [fills.seen[k] for k in fills.this_hour]
+    out.stats["activity.connections"] = len({c for by_conn in hour for c in by_conn})
+    out.stats["activity.fills_single_conn"] = sum(1 for by_conn in hour if len(by_conn) == 1)
+
+
 def activity(ln: RawLine, out: Out) -> None:
     rec = ln.rec
     if rec.get("ctl"):
         out.stats[f"activity.ctl.{rec['ctl']}"] += 1
         return
-    frame = frame_of(rec)
-    if not isinstance(frame, dict):
-        out.stats["activity.unparsed"] += 1
+    p = _trade(rec, out)
+    if p is None:
         return
-    kind = frame.get("type")
-    p = frame.get("payload")
-    if kind != "trades" or not isinstance(p, dict):
-        out.unknown_event_types[f"activity:{kind}"] += 1
+    if not _fills(out).add(_fill_key(p), (ln.host, as_int(rec.get("conn")))):
+        out.stats["activity.duplicates"] += 1
         return
     tok = text(p.get("asset"))
     price, size = dec(as_float(p.get("price"))), dec(as_float(p.get("size")))

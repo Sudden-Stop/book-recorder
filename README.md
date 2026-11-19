@@ -33,7 +33,7 @@ A segment cut short by a crash has no zstd end marker: readers must tolerate a t
 |---|---|---|
 | `polymarket` | `book_events` | CLOB market channel: `book`, `price_change`, `last_trade_price`, `tick_size_change`. Tokens are split over several connections (`conn` tells them apart). |
 | `polymarket` | `book_snapshots` | REST `/book` of every tracked token, one per token per `BR_POLYMARKET_SNAPSHOT_PERIOD_MS`: `{recv_ms, req_ms, asset, status, msg}`. Independent reference for the replay check. |
-| `polymarket` | `activity` | Real-time data socket `activity/trades`: every trade on the venue with wallet and transaction hash. |
+| `polymarket` | `activity` | Real-time data socket `activity/trades`: every trade on the venue with wallet and transaction hash. The venue silently stalls a socket a few dozen times a day, so `BR_POLYMARKET_ACTIVITY_CONNECTIONS` sockets record it in parallel (each fill arrives once per live socket; curation keeps one copy) and a socket with no frame for 6 s is replaced. |
 | `polymarket` | `universe` | Each hourly selection: pool size, selected markets with reason and rank, added / removed / in grace. |
 | `polymarket` | `markets` | Full Gamma record of a tracked market when added, once a day, and a `final` record when it leaves (fees, rewards, tick, end date, outcome). |
 | `kalshi` | `book_events` | One signed connection: `orderbook_snapshot` / `orderbook_delta` for tracked markets, **all** public `trade`s, **all** `market_lifecycle_v2` events, plus command replies. Fresh snapshots are requested every `BR_KALSHI_SNAPSHOT_PERIOD_MS`. |
@@ -76,6 +76,7 @@ markets below `BR_KALSHI_SAMPLE_MIN_VOLUME` are not considered.
 | `BR_HEALTH_PORT` | `8080` | `/healthz` returns 503 when a stream goes silent |
 | `BR_UNIVERSE_REFRESH_MS` / `BR_UNIVERSE_GRACE_MS` | 1 h / 6 h | |
 | `BR_POLYMARKET_ENABLED`, `BR_POLYMARKET_ACTIVITY_ENABLED` | `true` | |
+| `BR_POLYMARKET_ACTIVITY_CONNECTIONS` | `2` | parallel `activity` sockets |
 | `BR_POLYMARKET_TOP_N` / `_FEE_FREE_MAX` / `_SAMPLE_N` / `_PAIRED_MAX` | 100 / 120 / 80 / 100 | about 300 markets |
 | `BR_POLYMARKET_SHARD_SIZE` | `200` | tokens per connection |
 | `BR_POLYMARKET_SNAPSHOT_PERIOD_MS` | `600000` | |
