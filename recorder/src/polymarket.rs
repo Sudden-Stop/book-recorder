@@ -83,6 +83,11 @@ impl Protocol for ActivityProto {
     fn stall_after(&self) -> Duration {
         Duration::from_secs(6)
     }
+    /// Copies across connections are reduced to one when curating, so a stalled socket is
+    /// replaced make-before-break.
+    fn overlap_on_stall(&self) -> bool {
+        true
+    }
     fn inspect(&self, _conn: u64, raw: &str) -> Reaction {
         let t = raw.trim();
         Reaction { skip: t.is_empty() || t.eq_ignore_ascii_case("pong") || t.eq_ignore_ascii_case("ping"), ..Default::default() }

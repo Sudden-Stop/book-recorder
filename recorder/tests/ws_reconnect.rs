@@ -116,6 +116,7 @@ async fn records_frames_and_reconnects_after_a_drop() {
 /// A protocol whose server never answers pings, with a short stall timeout.
 struct Silent {
     url: String,
+    overlap: bool,
 }
 
 impl book_recorder::ws::Protocol for Silent {
@@ -146,6 +147,9 @@ impl book_recorder::ws::Protocol for Silent {
     fn stall_after(&self) -> Duration {
         Duration::from_millis(1_500)
     }
+    fn overlap_on_stall(&self) -> bool {
+        self.overlap
+    }
 }
 
 #[tokio::test]
@@ -169,13 +173,113 @@ async fn a_silent_socket_is_replaced_after_stall_after() {
     let sink = Arc::new(Sink::new(dir.path(), Arc::new(Health::new()), segments_tx));
     let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
     let (stop_tx, stop_rx) = watch::channel(false);
-    let task = tokio::spawn(run_connection(Arc::new(Silent { url }), sink, Arc::new(AtomicU64::new(0)), cmd_rx, Vec::new(), stop_rx));
+    let task = tokio::spawn(run_connection(Arc::new(Silent { url, overlap: false }), sink, Arc::new(AtomicU64::new(0)), cmd_rx, Vec::new(), stop_rx));
 
     let first = tokio::time::timeout(Duration::from_secs(5), accepted_rx.recv()).await.unwrap().unwrap();
     let second = tokio::time::timeout(Duration::from_secs(6), accepted_rx.recv()).await.unwrap().unwrap();
     let took = second - first;
     // Declared stalled 1.5-2.5 s after the last frame (1 s watchdog), then a sub-second backoff.
     assert!(took >= Duration::from_millis(1_500) && took < Duration::from_millis(4_000), "reconnected after {took:?}");
+    stop_tx.send(true).unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+}
+
+#[derive(Debug)]
+enum Seen {
+    Accepted(usize),
+    Closed(usize),
+}
+
+/// A venue that accepts every connection and then says nothing until `resume` flips, when
+/// it sends one trade on every socket still open.
+async fn paused_venue(resume: watch::Receiver<bool>) -> (String, mpsc::UnboundedReceiver<(Seen, tokio::time::Instant)>) {
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("ws://{}", listener.local_addr().unwrap());
+    let (tx, rx) = mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let mut i = 0usize;
+        loop {
+            i += 1;
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut ws = tokio_tungstenite::accept_async(stream).await.unwrap();
+            tx.send((Seen::Accepted(i), tokio::time::Instant::now())).unwrap();
+            let (tx, mut resume) = (tx.clone(), resume.clone());
+            tokio::spawn(async move {
+                loop {
+                    tokio::select! {
+                        message = ws.next() => match message {
+                            Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                            _ => {} // subscription and pings: ignored, like a paused venue
+                        },
+                        changed = resume.changed() => {
+                            if changed.is_err() { break; }
+                            let _ = ws.send(Message::Text(format!(r#"{{"type":"trades","conn":{i}}}"#).into())).await;
+                        }
+                    }
+                }
+                let _ = tx.send((Seen::Closed(i), tokio::time::Instant::now()));
+            });
+        }
+    });
+    (url, rx)
+}
+
+#[tokio::test]
+async fn a_stalled_socket_is_replaced_before_it_is_closed_and_the_resume_is_recorded() {
+    let (resume_tx, resume_rx) = watch::channel(false);
+    let (url, mut seen) = paused_venue(resume_rx).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (segments_tx, mut segments_rx) = mpsc::unbounded_channel();
+    let sink = Arc::new(Sink::new(dir.path(), Arc::new(Health::new()), segments_tx));
+    let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let task = tokio::spawn(run_connection(Arc::new(Silent { url, overlap: true }), sink.clone(), Arc::new(AtomicU64::new(0)), cmd_rx, Vec::new(), stop_rx));
+
+    // Three stall cycles: every replacement is accepted before the socket it replaces closes.
+    let mut events = Vec::new();
+    while !events.iter().any(|(e, _)| matches!(e, Seen::Closed(3))) {
+        events.push(tokio::time::timeout(Duration::from_secs(10), seen.recv()).await.unwrap().unwrap());
+    }
+    for n in 1..=3 {
+        let accepted_next = events.iter().position(|(e, _)| matches!(e, Seen::Accepted(i) if *i == n + 1)).unwrap();
+        let closed = events.iter().position(|(e, _)| matches!(e, Seen::Closed(i) if *i == n)).unwrap();
+        assert!(accepted_next < closed, "socket {} accepted after {n} closed: {events:?}", n + 1);
+    }
+
+    // The venue resumes: the socket that is up records it.
+    resume_tx.send(true).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    stop_tx.send(true).unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
+    sink.close_all();
+    let segment = segments_rx.recv().await.unwrap();
+    let trades = lines(&segment).into_iter().filter(|l| l.get("msg").is_some()).count();
+    assert_eq!(trades, 1, "the resumed trade is recorded once");
+}
+
+#[tokio::test]
+async fn repeated_stalls_after_good_handshakes_do_not_back_off() {
+    let (_resume_tx, resume_rx) = watch::channel(false);
+    let (url, mut seen) = paused_venue(resume_rx).await;
+    let dir = tempfile::tempdir().unwrap();
+    let (segments_tx, _segments_rx) = mpsc::unbounded_channel();
+    let sink = Arc::new(Sink::new(dir.path(), Arc::new(Health::new()), segments_tx));
+    let (_cmd_tx, cmd_rx) = mpsc::unbounded_channel();
+    let (stop_tx, stop_rx) = watch::channel(false);
+    let task = tokio::spawn(run_connection(Arc::new(Silent { url, overlap: false }), sink, Arc::new(AtomicU64::new(0)), cmd_rx, Vec::new(), stop_rx));
+
+    let mut accepted = Vec::new();
+    while accepted.len() < 5 {
+        if let (Seen::Accepted(_), t) = tokio::time::timeout(Duration::from_secs(10), seen.recv()).await.unwrap().unwrap() {
+            accepted.push(t);
+        }
+    }
+    // Stall (1.5 s + up to 1 s watchdog) plus the base delay, every time. With a growing
+    // backoff the fourth gap alone would add 4 s.
+    for pair in accepted.windows(2) {
+        let gap = pair[1] - pair[0];
+        assert!(gap < Duration::from_millis(3_600), "gap {gap:?}");
+    }
     stop_tx.send(true).unwrap();
     let _ = tokio::time::timeout(Duration::from_secs(5), task).await;
 }

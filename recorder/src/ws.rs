@@ -63,6 +63,12 @@ pub trait Protocol: Send + Sync + 'static {
     fn stall_after(&self) -> Duration {
         self.ping_interval() * 3
     }
+    /// On a stall, open and subscribe the replacement before closing the stalled socket.
+    /// Only for streams that tolerate two connections briefly delivering the same frames
+    /// (the pipeline keeps one copy).
+    fn overlap_on_stall(&self) -> bool {
+        false
+    }
     /// Called for every text frame before it is recorded. `conn` identifies the connection.
     fn inspect(&self, _conn: u64, _raw: &str) -> Reaction {
         Reaction::default()
@@ -85,6 +91,47 @@ fn backoff(attempt: u32) -> Duration {
     Duration::from_millis(base + jitter)
 }
 
+type Socket = tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>;
+
+/// Opens the socket (handshake only).
+async fn dial<P: Protocol>(proto: &P) -> Result<Socket> {
+    let mut request = proto.url().into_client_request()?;
+    for (name, value) in proto.headers()? {
+        request.headers_mut().insert(HeaderName::from_bytes(name.as_bytes())?, HeaderValue::from_str(&value)?);
+    }
+    Ok(tokio_tungstenite::connect_async(request).await?.0)
+}
+
+/// Sends the opening subscription for the full id set and logs `connect`. False if a send failed.
+async fn open<P: Protocol>(proto: &P, sink: &Sink, socket: &mut Socket, conn: u64, ids: &BTreeSet<String>) -> bool {
+    let (venue, stream) = (proto.venue(), proto.stream());
+    proto.opened(conn);
+    let current: Vec<String> = ids.iter().cloned().collect();
+    let mut ok = true;
+    for message in proto.on_open(&current) {
+        ok &= socket.send(Message::Text(message.into())).await.is_ok();
+    }
+    sink.control(venue, stream, now_ms(), conn, "connect", json!({ "assets": current }));
+    tracing::info!(venue, stream, conn, assets = current.len(), "websocket subscribed");
+    ok
+}
+
+/// Records a data frame as received, acting on no reaction. True if it was recorded.
+fn record<P: Protocol>(proto: &P, sink: &Sink, conn: u64, message: &Message) -> bool {
+    let recv_ms = now_ms();
+    match message {
+        Message::Text(text) if !proto.inspect(conn, text.as_str()).skip => {
+            sink.frame(proto.venue(), proto.stream(), recv_ms, conn, text.as_str());
+            true
+        }
+        Message::Binary(bytes) => {
+            sink.frame(proto.venue(), proto.stream(), recv_ms, conn, &String::from_utf8_lossy(bytes));
+            true
+        }
+        _ => false,
+    }
+}
+
 /// Runs one connection until `shutdown` flips. `ids` is the initial subscription set.
 pub async fn run_connection<P: Protocol>(
     proto: Arc<P>,
@@ -97,44 +144,34 @@ pub async fn run_connection<P: Protocol>(
     let (venue, stream) = (proto.venue(), proto.stream());
     let mut ids: BTreeSet<String> = initial.into_iter().collect();
     let mut attempt = 0u32;
+    // A replacement already opened and subscribed while the stalled connection was still up.
+    let mut handover: Option<(u64, Socket, bool)> = None;
     loop {
         if *shutdown.borrow() {
             return;
         }
-        let conn = conn_ids.fetch_add(1, Ordering::Relaxed) + 1;
-        let request = (|| -> Result<_> {
-            let mut request = proto.url().into_client_request()?;
-            for (name, value) in proto.headers()? {
-                request.headers_mut().insert(HeaderName::from_bytes(name.as_bytes())?, HeaderValue::from_str(&value)?);
-            }
-            Ok(request)
-        })();
-        let connected = match request {
-            Ok(request) => tokio_tungstenite::connect_async(request).await.map_err(anyhow::Error::from),
-            Err(error) => Err(error),
-        };
-        let mut socket = match connected {
-            Ok((socket, _)) => socket,
-            Err(error) => {
-                let wait = backoff(attempt);
-                attempt += 1;
-                sink.control(venue, stream, now_ms(), conn, "connect_error", json!({ "error": format!("{error:#}") }));
-                tracing::warn!(venue, stream, conn, error = format!("{error:#}"), ?wait, "connect failed");
-                tokio::select! {
-                    _ = tokio::time::sleep(wait) => continue,
-                    _ = shutdown.changed() => return,
+        let (conn, mut socket, mut failed) = match handover.take() {
+            Some(next) => next,
+            None => {
+                let conn = conn_ids.fetch_add(1, Ordering::Relaxed) + 1;
+                match dial(&*proto).await {
+                    Ok(mut socket) => {
+                        let ok = open(&*proto, &sink, &mut socket, conn, &ids).await;
+                        (conn, socket, !ok)
+                    }
+                    Err(error) => {
+                        let wait = backoff(attempt);
+                        attempt += 1;
+                        sink.control(venue, stream, now_ms(), conn, "connect_error", json!({ "error": format!("{error:#}") }));
+                        tracing::warn!(venue, stream, conn, error = format!("{error:#}"), ?wait, "connect failed");
+                        tokio::select! {
+                            _ = tokio::time::sleep(wait) => continue,
+                            _ = shutdown.changed() => return,
+                        }
+                    }
                 }
             }
         };
-
-        proto.opened(conn);
-        let current: Vec<String> = ids.iter().cloned().collect();
-        let mut failed = false;
-        for message in proto.on_open(&current) {
-            failed |= socket.send(Message::Text(message.into())).await.is_err();
-        }
-        sink.control(venue, stream, now_ms(), conn, "connect", json!({ "assets": current }));
-        tracing::info!(venue, stream, conn, assets = current.len(), "websocket subscribed");
 
         let interval = proto.ping_interval();
         let mut ping = tokio::time::interval(interval);
@@ -146,6 +183,7 @@ pub async fn run_connection<P: Protocol>(
         let mut reason = serde_json::Value::Null;
         let mut code: Option<u16> = None;
         let mut frames = 0u64;
+        let mut stalled = false;
 
         while !failed {
             tokio::select! {
@@ -216,6 +254,7 @@ pub async fn run_connection<P: Protocol>(
                     // Nothing at all (not even a pong) for too long: assume a half-open socket.
                     if last_frame.elapsed() > stall_after {
                         reason = json!("stalled");
+                        stalled = true;
                         break;
                     }
                 }
@@ -234,9 +273,47 @@ pub async fn run_connection<P: Protocol>(
             }
         }
 
+        if stalled && proto.overlap_on_stall() {
+            // Make before break: open and subscribe the replacement while still reading the
+            // stalled socket. When the venue pauses, every socket goes quiet at once; if the
+            // stalled one was only quiet, what it delivers meanwhile is still recorded, and
+            // there is never a moment without a subscribed socket.
+            let next = conn_ids.fetch_add(1, Ordering::Relaxed) + 1;
+            let dialing = dial(&*proto);
+            tokio::pin!(dialing);
+            let mut old_open = true;
+            let dialed = loop {
+                tokio::select! {
+                    result = &mut dialing => break Some(result),
+                    message = socket.next(), if old_open => match message {
+                        Some(Ok(message)) => frames += u64::from(record(&*proto, &sink, conn, &message)),
+                        _ => old_open = false,
+                    },
+                    _ = shutdown.changed() => break None,
+                }
+            };
+            match dialed {
+                Some(Ok(mut new_socket)) => {
+                    let ok = open(&*proto, &sink, &mut new_socket, next, &ids).await;
+                    handover = Some((next, new_socket, !ok));
+                }
+                Some(Err(error)) => {
+                    sink.control(venue, stream, now_ms(), next, "connect_error", json!({ "error": format!("{error:#}") }));
+                    tracing::warn!(venue, stream, conn = next, error = format!("{error:#}"), "replacement connect failed");
+                }
+                None => {}
+            }
+        }
+
         let _ = socket.close(None).await;
         sink.control(venue, stream, now_ms(), conn, "disconnect", json!({ "code": code, "reason": reason, "frames": frames }));
         tracing::warn!(venue, stream, conn, ?code, %reason, frames, "websocket closed");
+        if handover.is_some() {
+            // The replacement is subscribed to the current set; pending commands reach it
+            // from the queue as usual.
+            attempt = 0;
+            continue;
+        }
         // Commands that arrived while disconnected still update the id set.
         while let Ok(cmd) = cmds.try_recv() {
             match cmd {
@@ -247,7 +324,9 @@ pub async fn run_connection<P: Protocol>(
                 Cmd::Send(_) => {}
             }
         }
-        attempt = if frames > 0 { 0 } else { attempt + 1 };
+        // A stall after a good handshake is the venue going quiet, not refusing us: retry at
+        // the base delay instead of backing off, or a paused venue resumes while we are away.
+        attempt = if frames > 0 || stalled { 0 } else { attempt + 1 };
         tokio::select! {
             _ = tokio::time::sleep(backoff(attempt)) => {}
             _ = shutdown.changed() => return,
