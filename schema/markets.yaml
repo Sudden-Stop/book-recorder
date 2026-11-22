@@ -47,7 +47,7 @@ columns:
   - name: tick_size
     type: price
     nullable: true
-    meaning: Minimum price increment.
+    meaning: "Minimum price increment. On Kalshi the finest step of `price_ranges`: tapered markets are coarser away from 0 and 1 (the ranges are in `raw`). Null on Kalshi rows curated by earlier pipeline versions (2026-11-15..21 among them)."
   - name: min_order_size
     type: size
     nullable: true
@@ -71,7 +71,7 @@ columns:
   - name: resolution_ts
     type: timestamp
     nullable: true
-    meaning: Resolution time when the venue gives it, UTC ms.
+    meaning: "Settlement time when the venue gives it, UTC ms. Not the moment the outcome became known: on Polymarket a game settles a median 3 h after it starts, and most non-sports markets are already priced above 0.95 an hour before it."
   - name: volume_24h
     type: float64
     nullable: true
@@ -83,7 +83,7 @@ columns:
   - name: fee_type
     type: string
     nullable: true
-    meaning: Kalshi series fee type (`series` rows only; join to markets on the series prefix of `event_id`, e.g. `KXNBAGAME`).
+    meaning: "Fee schedule name. Kalshi: on `series` rows only; join to markets on the series prefix of `event_id`, e.g. `KXNBAGAME`. Polymarket: `feeType` of the market record (e.g. `sports_fees_v3`), null when fee-free and on rows curated by earlier pipeline versions (2026-11-15..21 among them)."
   - name: fee_multiplier
     type: float64
     nullable: true
@@ -91,7 +91,7 @@ columns:
   - name: tags
     type: list<string>
     nullable: true
-    meaning: Venue tags or category labels.
+    meaning: "Venue tags or category labels. In practice only Kalshi `series` rows have one (the category); Polymarket's market record carries none."
   - name: universe_rank
     type: int32
     nullable: true

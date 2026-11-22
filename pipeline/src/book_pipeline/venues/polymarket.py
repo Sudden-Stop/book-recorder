@@ -407,6 +407,7 @@ def _market_row(m: dict, snap_ts: int, source: str, host: str, out: Out, extra: 
         "resolution_ts": iso_ms(first(m, "closedTime", "umaEndDate")) if as_bool(m.get("closed")) else None,
         "volume_24h": as_float(first(m, "volume24hr", "volume_24hr", "volume24h")),
         "fees_enabled": as_bool(first(m, "feesEnabled", "fees_enabled")),
+        "fee_type": text(m.get("feeType")),
         "tags": _tags(m), "raw": dumps(m), "host": host, **(extra or {}),
     })
 

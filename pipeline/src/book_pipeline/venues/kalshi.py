@@ -254,6 +254,15 @@ def book_event(ln: RawLine, out: Out) -> None:
         out.unknown_event_types[str(kind)] += 1
 
 
+def min_step(market: dict) -> Decimal | None:
+    """Finest price step of a market's `price_ranges` (a tapered market is finer near 0 and 1)."""
+    ranges = market.get("price_ranges")
+    if not isinstance(ranges, list):
+        return None
+    steps = [s for s in (_d(r.get("step")) for r in ranges if isinstance(r, dict)) if s is not None and s > 0]
+    return min(steps) if steps else None
+
+
 def _secs(value) -> int | None:
     return to_ms(value, seconds_if_small=True) if not isinstance(value, str) or value.isdigit() else iso_ms(value)
 
@@ -280,6 +289,8 @@ def _market_row(m: dict, ts: int, source: str, host: str, out: Out, extra: dict 
     status = text(m.get("status"))
     result = text(m.get("result"))
     tick = _price(first(m, "tick_size_dollars", "price_increment_dollars"), m.get("tick_size"))
+    if tick is None:
+        tick = min_step(m)
     out.row("markets", {
         "snapshot_ts": ts, "source": source, "market_id": tid, "event_id": text(m.get("event_ticker")),
         "slug": None, "question": text(first(m, "title", "yes_sub_title", "subtitle")),

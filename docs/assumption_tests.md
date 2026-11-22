@@ -17,28 +17,51 @@ cite those for the classical framework.
 
 ## Common preparation
 
-- **Coverage.** Drop market-hours that `coverage` marks as gapped, and cut every replay at `gap` rows of
-  `book_deltas`. Only `validate`-clean token-days enter estimation.
+- **Prepared tables.** `python -m book_pipeline.prepare` derives what the curated tables do not state directly:
+  `markets` (category, tick, fees, outcome), `trade_reach`, `activity_surplus` and `exclusions`. Trade rows join
+  on `(dt, hour, source, host, line, item)`, with `dt` and `hour` taken from the file path.
+- **Coverage.** Cut every replay at `gap` rows of `book_deltas` and resume at the next `reset`; count exposure
+  time without those intervals. Do not drop whole market-hours for containing a gap: in 2026-11-15..21 that
+  discards 12.3 % of Polymarket market-hours to avoid 0.24 % of the time. Only `validate`-clean token-days enter
+  estimation. A day whose nightly summary fails only at the `chain` step is clean for books and `market_ws`
+  trades: that step judges the `activity` feed.
+- **Exclusions.** Remove the windows of `docs/data_exclusions.csv` from events and from exposure time. A venue
+  pause with the socket up is not a gap, so coverage does not show it.
 - **Book state.** Replay `book_deltas` per token to get best bid, best ask and depth at every `recv_ts`.
   Polymarket: a YES bid is a NO ask at 1 − price, so merge the two tokens of a market into one YES book (see A11).
   Kalshi: one book per market already.
 - **Mid and belief.** p_t = (best_bid + best_ask) / 2; log-odds x_t = ln(p / (1 − p)). Flag one-tick spreads and
   empty sides; drop states with p outside [0.02, 0.98] where the logit is unstable.
 - **Time to resolution.** τ = resolution time − t. Use `markets.resolution_ts` where present (Kalshi `lifecycle`
-  `determined`), else the `final` record's time; keep `end_ts` (listed) separately for A10. Normalise per market as
+  `determined`), else the `final` record's time, else the prepared `markets.resolution_ts`
+  (`resolution_source = chain` is the settlement block); keep `end_ts` (listed) separately for A10. Normalise per market as
   t/T over its recorded life where a model quantity is in t/T.
-- **Strata.** All statistics are reported by venue × category (`tags`; sports vs the rest at least) × p bucket
+- **Which clock.** `resolution_ts` is settlement, not the moment uncertainty ends, and using it as a horizon is
+  also look-ahead. In 2026-11-15..21, one hour before settlement 92 % of Polymarket non-sports and 43 % of sports
+  markets already priced the winner above 0.95. Use times known ex ante: Polymarket games have
+  `markets.event_start_ts` (5 % decided at that moment), so report pre-game and in-play separately. Kalshi gives no
+  start: its `occurrence_datetime` equals the expected end (85 % of sports markets decided by then). In A2 and A4
+  stop each series when the event is over, or the approach to T is mostly a market that has already been decided.
+- **Strata.** All statistics are reported by venue × category (prepared `markets.category`, because `tags` is
+  empty on market rows; fee-free Polymarket markets have none and form a stratum of their own; sports vs the rest
+  at least) × p bucket
   (0.05 wide) × τ bucket (log-spaced). Kalshi has fees on most series and Polymarket has fee-free markets
   (`fees_enabled`), so venue also separates fee regimes (A8).
 - **Trades.** Use `trades` with `source = market_ws` for side and timing (one copy per fill). Use
-  `source = activity` only for wallet-level work (A6), and never sum the two sources.
+  `source = activity` only for wallet-level work (A6) and for the depth a trade reached (A5), and never sum the
+  two sources. Anti-join `activity_surplus` whenever `activity` is used.
 
 ## Assumptions and tests
 
 ### A1. Price is a martingale and equals the event probability (§2.1)
 
-- **Data:** mid series; `markets.resolved_outcome`.
-- **Test:** (a) calibration: bin mids at fixed horizons before resolution (1 h, 1 d, 7 d) and compare with the
+- **Data:** mid series; prepared `markets.outcome` (not curated `resolved_outcome` alone: markets that a recorder
+  restart dropped mostly lack it there, which biases the sample).
+- **Selection:** resolved-by-the-cutoff is itself a selection ("by date" contracts that resolve early resolve
+  YES). Select markets by listed end date before the cutoff, report how many are still unresolved, and cluster
+  by event. Horizons count back from `event_start_ts` or the listed `end_ts`, never from `resolution_ts`. One
+  week is thin for this test: pre-game Polymarket is its cleanest sample, and 7 d is impossible.
+- **Test:** (a) calibration: bin mids at fixed horizons before the event start or listed end (1 h, 1 d, 7 d) and compare with the
   realised frequency of YES; reliability curve and Brier score with bootstrap CIs by market. (b) drift: regress
   Δp over the next interval on p and τ; under the martingale the slope and intercept are zero. Known
   favourite-longshot bias would show as calibration error near 0 and 1.
@@ -76,6 +99,9 @@ cite those for the classical framework.
 The central test. The model is Λ^b = A(t, p) · (2π/(π + p))^ν · exp(−k(t)(p − π)) on the bid, symmetric on the ask.
 
 - **Data:** replayed book; `trades` with taker side.
+- **Depth reached:** on Polymarket use `trade_reach.reach_price`, not the `market_ws` price, which on a sweep is
+  often the average. Where `status` is not `exact` the depth is unknown: report that share and a sensitivity
+  bound, and do not put the print in its place silently.
 - **Estimator:** for each side and each distance δ (in ticks from mid, then in price), estimate the rate at
   which a resting order at that distance would have been reached: count taker trades whose execution reached
   δ or beyond (a sell that sweeps to the bid at δ fills every level above it), divided by the time the book had
@@ -111,14 +137,16 @@ The central test. The model is Λ^b = A(t, p) · (2π/(π + p))^ν · exp(−k(t
 
 ### A8. No fees (not modelled)
 
-- **Data:** `markets.fees_enabled`, `fee_type`, `fee_multiplier`; `trades.fee_rate_bps`.
+- **Data:** prepared `markets.fees_enabled`, `fee_type`, `fee_rate` (Polymarket), `fee_multiplier` (Kalshi, from
+  its series); `trades.fee_rate_bps`.
 - **Test:** compare spreads, depth and A5 fits between fee-free and fee-charging markets at matched (p, τ, volume),
   and across venues on the `pairs` games. Compute the fee per share against the model's optimal half-spread.
 - **Fails if:** fees are comparable to the half-spread, which would make them a first-order term.
 
 ### A9. Continuous quotes, no tick size (§2.1.2)
 
-- **Data:** `book_deltas.tick_size`, `markets.tick_size`; spreads from the replay.
+- **Data:** `book_deltas.tick_size`, prepared `markets.tick_size`; spreads from the replay. On tapered Kalshi
+  markets (`price_structure`) that is the finest step: the step at a given price is in `raw.price_ranges`.
 - **Test:** spread distribution in ticks; share of time the spread is one tick (tick-constrained). Compare with
   the model's 0.04–0.055 spread scale.
 - **Fails if:** books are mostly one tick wide; then the control is queue position, not price, and the model's

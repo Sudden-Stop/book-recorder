@@ -33,11 +33,11 @@ columns:
   - name: price
     type: price
     nullable: false
-    meaning: Trade price, dollars per share. Activity-feed prices arrive as binary floats and are rounded to 6 decimals.
+    meaning: "Trade price, dollars per share. Activity-feed prices arrive as binary floats and are rounded to 6 decimals. A Polymarket `market_ws` row is one taker order: when it swept several levels its price is often an average, not the worst level reached (that is in the maker rows of the same `tx_hash` in `activity`)."
   - name: size
     type: size
     nullable: false
-    meaning: Shares (Polymarket) or contracts (Kalshi).
+    meaning: "Shares (Polymarket) or contracts (Kalshi). On Polymarket `market_ws` the taker order's whole fill."
   - name: side
     type: string
     nullable: true

@@ -51,6 +51,10 @@ Coverage:
 
 - Polymarket's activity feed reports one side of each fill with its wallet; whether that wallet was the taker
   is not established (`trades.side` for `source = activity`).
+- A Polymarket `market_ws` trade is one taker order. Its price is often the average of a sweep, so depth reached
+  has to be taken from the maker rows of the same transaction in `activity`, or from the book.
+- A venue that pauses with the socket up (maintenance) is not a gap: coverage reports it as connected. The known
+  windows are in `docs/data_exclusions.csv` of the source repository.
 - The same trade can appear twice in `trades` (once per source); there is no cross-source deduplication.
 - Kalshi parsing follows the recorder's code and is marked unverified until a real recorded hour has been
   checked. Kalshi `book_snapshots` come from the same socket as `book_deltas` (`source = ws`), so the Kalshi

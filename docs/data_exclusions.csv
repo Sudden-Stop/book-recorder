@@ -1,0 +1,5 @@
+venue,from_utc,to_utc,reason
+polymarket,2026-11-15T18:00Z,2026-11-15T19:00Z,recorder launch (first frames at 18:11)
+kalshi,2026-11-15T18:00Z,2026-11-15T19:00Z,recorder launch (first frames at 18:12; replay 98.4%)
+kalshi,2026-11-19T08:00Z,2026-11-19T10:00Z,no trade from 08:00:10 to 10:00 with the socket up and no sequence gap (inferred exchange maintenance): not exposure time
+polymarket,2026-11-20T06:00Z,2026-11-20T06:15Z,announced CLOB maintenance: silent stretches while coverage says connected
