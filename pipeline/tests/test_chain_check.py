@@ -100,12 +100,11 @@ def test_nightly_runs_the_chain_check_only_when_an_rpc_is_set(tmp_path, monkeypa
     shutil.copytree(FIXTURES / "raw", root / "raw")
     calls = []
 
-    def fake(root_uri, dt, hours, **kw):
-        calls.append((dt, hours))
-        return {"ok": False, "problems": ["in-scope completeness outside outages 99.0% < 99.8%"],
-                "in_scope": {}, "missing": {"by_cause": {}}}
+    def fake(root_uri, dt, hour):
+        calls.append((dt, [hour]))
+        return {"ok": False, "problems": ["in-scope completeness outside outages 99.0% < 99.8%"]}
 
-    monkeypatch.setattr(nightly.chain_check, "run", fake)
+    monkeypatch.setattr(nightly, "_chain_hour", fake)
     monkeypatch.delenv(cc.RPC_ENV, raising=False)
     s = nightly.run(str(root), DT, venues=("polymarket",), log=lambda e: None)
     assert s["ok"] and calls == []
@@ -154,3 +153,53 @@ def test_broken_feed_or_failed_redundancy_fails():
     assert any("completeness" in p for p in cc.problems(_scope_rep(98.5, 0.0)))
     assert any("socket was down" in p for p in cc.problems(_scope_rep(99.9, 1.4, 1951)))
     assert cc.problems(_scope_rep(99.9, 0.04, 50)) == []
+
+
+def test_outages_match_a_plain_sort_of_every_frame(monkeypatch):
+    import random
+
+    from book_pipeline.storage import RawLine
+
+    rng = random.Random(7)
+    for _ in range(300):
+        t, frames = 1_795_000_000_000, []
+        for _ in range(rng.randint(0, 120)):
+            t += rng.choice((0, 1, 40, 900, 1000, 1999, 2999, 3000, 3001, 7500, rng.randint(0, 4000)))
+            frames.append(t)
+        shuffled = frames[:]
+        rng.shuffle(shuffled)  # several sockets, hosts and parts: not in time order
+        monkeypatch.setattr(cc, "iter_raw", lambda *a, **k: (RawLine("rec-a", i, {"recv_ms": x})
+                                                            for i, x in enumerate(shuffled)))
+        got = [(g["from_ms"], g["to_ms"]) for g in cc.outages(None, [("2026-11-18", "18")])]
+        assert got == [(a, b) for a, b in zip(frames, frames[1:]) if b - a >= cc.SILENCE_MS]
+
+
+def test_reconcile_takes_a_stream_and_reports_surplus_rows():
+    f = cc.decode(_log("0x01", A, B, 0, 7, 1_000_000, 2_000_000))
+    f["block_ts"] = 150
+    row = _row("0x01", A, "7", "buy", "2", "0.5", 150)
+    stray = _row("0x09", B, "7", "buy", "2", "0.5", 150)
+    rep = cc.reconcile([f], iter([row, dict(row), stray]), 100, 200, gaps=[])
+    assert rep["matched"] == 1 and rep["activity_rows_in_window"] == 3
+    assert rep["extra_activity_rows"]["n"] == 2  # the repeat of a filled row, and the unknown transaction
+    assert rep["extra_activity_rows"]["tx_on_chain"] == 1
+
+
+def test_reconcile_does_not_keep_the_rows():
+    import tracemalloc
+
+    rows = (_row(f"0x{i:064x}", A, "7", "buy", "2", "0.5", 10) for i in range(20_000))  # all outside the window
+    tracemalloc.start()
+    try:
+        cc.reconcile([], rows, 100, 200, gaps=[])
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    assert peak < 1_000_000  # keeping them takes over 10 MB
+
+
+def test_get_logs_yields_before_fetching_the_next_page():
+    logs = {n: [_log(f"0x{n:02x}", A, B, 0, 7, 1, 2)] for n in range(100, 200)}
+    rpc = _FakeRpc(logs, limit=40)
+    next(cc.get_logs(rpc, 100, 199))
+    assert rpc.calls == 1

@@ -3,7 +3,7 @@
 Records order book data from **Polymarket** and **Kalshi**, ships it hourly to S3, and (in `pipeline/`)
 turns it into a typed Parquet dataset for Hugging Face. The first use of the data is testing the
 assumptions of Feil & Nendel, *Optimal Market Making in Prediction Markets* (arXiv 2607.17991), on
-real markets.
+real markets; the test plan is in [docs/assumption_tests.md](docs/assumption_tests.md).
 
 ```
 recorder/   Rust binary: sockets + REST -> hourly zstd NDJSON segments -> S3

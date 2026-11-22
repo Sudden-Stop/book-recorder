@@ -51,3 +51,26 @@ def test_a_fill_straddling_the_hour_is_kept_in_the_first_hour_only(tmp_path):
     # Without warming, the late copy of the boundary fill is kept.
     curate.run(str(tmp_path), str(tmp_path / "cold"), "polymarket", DT, HOUR, warm=False)
     assert sorted(r["tx_hash"] for r in trades(tmp_path / "cold")) == ["0xedge", "0xnew"]
+
+
+def test_compact_state_decides_like_plain_per_socket_counts():
+    import random
+
+    from book_pipeline.venues.polymarket import _Fills
+
+    rng = random.Random(3)
+    for _ in range(3000):
+        fills, counts = _Fills(), {}
+        for i in range(rng.randint(1, 14)):
+            key, conn = bytes([rng.randint(0, 2)]), ("rec-a", rng.randint(1, 4))
+            by_conn = counts.setdefault(key, {})
+            before = max(by_conn.values(), default=0)
+            by_conn[conn] = by_conn.get(conn, 0) + 1
+            assert fills.add(key, conn, warm=i < 2) == (by_conn[conn] > before)
+
+
+def test_equal_numbers_are_one_fill():
+    from book_pipeline.venues.polymarket import _fill_key
+
+    assert _fill_key(fill("0x1", size=20)["payload"]) == _fill_key(fill("0x1", size=20.0)["payload"])
+    assert _fill_key(fill("0x1", size=20)["payload"]) != _fill_key(fill("0x1", size=21)["payload"])

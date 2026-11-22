@@ -204,7 +204,9 @@ nightly pipeline timer; the `book-recorder-health-check-failed` alarm should be 
 The pipeline container is capped at 1 GB of memory and 1.5 CPUs and runs at low CPU and IO priority at
 02:30 UTC. It runs `book-pipeline nightly`: for each venue (polymarket, kalshi, cross) it curates every hour
 of yesterday (UTC) that has raw data in the bucket into `curated/`, validates it, and writes reports under
-`reports/`. Hours already curated are skipped, so a rerun after a crash picks up where it stopped. A failing
+`reports/`. The on-chain check of Polymarket runs after all three venues, each hour in a process of its own.
+Hours already curated or checked are skipped, so a rerun after a crash picks up where it stopped, and it still
+lists the hours whose earlier validation or on-chain check failed. A failing
 hour does not stop the others; it is listed in the summary and the job exits 1, which shows up as a failed
 `book-recorder-pipeline` unit. Publishing to Hugging Face stays a manual `book-pipeline publish` step.
 

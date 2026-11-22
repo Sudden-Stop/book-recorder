@@ -17,6 +17,8 @@ Frame semantics follow `data-ingestion/apps/book-compact/src/flatten-events.ts` 
 """
 from __future__ import annotations
 
+from hashlib import blake2b
+
 from ..storage import RawLine, frame_of
 from ..writer import dec
 from .common import (Out, as_bool, as_float, as_int, as_list, dumps, first, iso_ms, text, to_ms)
@@ -224,24 +226,32 @@ class _Fills:
     A fill is identified by every field the feed gives it. The same identity can legitimately repeat on one
     socket (identical fills in one transaction), so copies are counted per socket and a fill is kept as many
     times as the socket that saw it most often: the multiset union of the sockets, never their sum.
+
+    An hour holds over 200,000 fills, so each is stored small: a 16-byte digest of its identity, pointing to the
+    sockets that delivered a copy (one small int per copy). The few hundred distinct such tuples are shared.
     """
 
     def __init__(self) -> None:
-        self.kept: dict[tuple, int] = {}
-        self.seen: dict[tuple, dict[tuple, int]] = {}
-        self.this_hour: set[tuple] = set()  # keys received this hour (not only in the warmed tail)
+        self.seen: dict[bytes, tuple[int, ...]] = {}
+        self.warm_only: set[bytes] = set()  # in the warmed tail and not (yet) received this hour
+        self.conn_index: dict[tuple, int] = {}
+        self.shared: dict[tuple[int, ...], tuple[int, ...]] = {}
 
-    def add(self, key: tuple, conn: tuple, warm: bool = False) -> bool:
+    def add(self, key: bytes, conn: tuple, warm: bool = False) -> bool:
         """Registers one copy from `conn`; True when it is new (kept), False when a duplicate."""
-        if not warm:
-            self.this_hour.add(key)
-        by_conn = self.seen.setdefault(key, {})
-        n = by_conn.get(conn, 0) + 1
-        by_conn[conn] = n
-        if n > self.kept.get(key, 0):
-            self.kept[key] = n
-            return True
-        return False
+        copies = self.seen.get(key, ())
+        if warm:
+            if not copies:
+                self.warm_only.add(key)
+        else:
+            self.warm_only.discard(key)
+        c = self.conn_index.setdefault(conn, len(self.conn_index))
+        # kept so far = the most copies any one socket delivered; this one is new if it takes `conn` past that
+        mine = copies.count(c)
+        new = all(copies.count(other) <= mine for other in set(copies))
+        grown = copies + (c,)
+        self.seen[key] = self.shared.setdefault(grown, grown)
+        return new
 
 
 def _fills(out: Out) -> _Fills:
@@ -267,10 +277,13 @@ def _trade(rec: dict, out: Out | None = None) -> dict | None:
     return p
 
 
-def _fill_key(p: dict) -> tuple:
+def _fill_key(p: dict) -> bytes:
     wallet = p.get("proxyWallet")
-    return (p.get("transactionHash"), p.get("asset"), wallet.lower() if isinstance(wallet, str) else wallet,
-            p.get("side"), p.get("size"), p.get("price"), p.get("fee"), p.get("timestamp"), p.get("outcomeIndex"))
+    # the digest is of the repr, so numbers that are equal must look equal: 20 and 20.0 are one size
+    num = [float(v) if type(v) is int else v for v in (p.get("size"), p.get("price"), p.get("fee"))]
+    identity = (p.get("transactionHash"), p.get("asset"), wallet.lower() if isinstance(wallet, str) else wallet,
+                p.get("side"), *num, p.get("timestamp"), p.get("outcomeIndex"))
+    return blake2b(repr(identity).encode(), digest_size=16).digest()
 
 
 def warm_activity(ln: RawLine, out: Out) -> None:
@@ -288,9 +301,16 @@ def finish(out: Out) -> None:
     fills = getattr(out, "_activity_fills", None)
     if fills is None:
         return
-    hour = [fills.seen[k] for k in fills.this_hour]
-    out.stats["activity.connections"] = len({c for by_conn in hour for c in by_conn})
-    out.stats["activity.fills_single_conn"] = sum(1 for by_conn in hour if len(by_conn) == 1)
+    conns: set[int] = set()
+    single = 0
+    for key, copies in fills.seen.items():
+        if key in fills.warm_only:
+            continue
+        distinct = set(copies)
+        conns |= distinct
+        single += len(distinct) == 1
+    out.stats["activity.connections"] = len(conns)
+    out.stats["activity.fills_single_conn"] = single
 
 
 def activity(ln: RawLine, out: Out) -> None:

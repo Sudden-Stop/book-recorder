@@ -28,6 +28,10 @@ hour boundary is not counted as missing. When a neighbouring hour is not curated
 run), the edge of the window next to it is left out of the count (`EDGE_S`). Recorder outages come from the raw
 `activity` stream: silences in the union of the sockets' frames, with the `ctl: disconnect` reasons inside them.
 
+Memory: the check shares a 1 GB container with the nightly run, so only the window's on-chain fills are held.
+Logs are decoded as each RPC page arrives, activity rows are matched as they are read, and the frames are reduced
+to their first and last time in each second.
+
 RPC: `--rpc` (repeatable), else `$POLYGON_RPC_URL` followed by public RPCs. Each URL keeps its own `eth_getLogs`
 block range, halved whenever that RPC refuses a range (Alchemy's free plan allows 10 blocks). Block times are taken
 from the logs' `blockTimestamp` when the RPC returns it, otherwise fetched per block.
@@ -45,6 +49,7 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from typing import Iterable, Iterator
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -68,6 +73,9 @@ LOGS_RANGE = 40  # initial eth_getLogs block range per RPC
 MARGIN_S = 120  # on-chain fills fetched this far around the window, so activity rows near its edges match
 EDGE_S = 30  # next to a neighbouring hour that is not curated, this much of the window is not counted
 SILENCE_MS = 3000  # a gap this long in the union of the sockets' frames counts as an outage
+BUCKET_MS = 1000  # frames are kept as (first, last) per bucket; must not exceed SILENCE_MS
+BATCH_ROWS = 20_000  # activity rows turned into Python objects at a time
+EXAMPLES = 20
 # Pass / fail. The feed itself loses a steady ~0.08-0.09 % of orders and skips 1-3 whole blocks an hour with a
 # healthy socket (measured on 2026-11-18), which only a chain backfill recovers; failing on that would fail most
 # nights for nothing anyone can act on. So the check fails on what needs action:
@@ -162,10 +170,10 @@ def block_at(rpc: Rpc, ts: int) -> int:
     return lo
 
 
-def get_logs(rpc: Rpc, b0: int, b1: int) -> list[dict]:
-    """OrderFilled logs in blocks [b0, b1]. Each RPC's range is halved when it refuses one; an RPC that fails at
-    a range of one block, or does not answer, hands over to the next."""
-    out, b = [], b0
+def get_logs(rpc: Rpc, b0: int, b1: int) -> Iterator[dict]:
+    """Yields the OrderFilled logs in blocks [b0, b1], page by page. Each RPC's range is halved when it refuses
+    one; an RPC that fails at a range of one block, or does not answer, hands over to the next."""
+    b = b0
     while b <= b1:
         for u in rpc.urls:
             got = None
@@ -183,12 +191,11 @@ def get_logs(rpc: Rpc, b0: int, b1: int) -> list[dict]:
                 except Exception:  # noqa: BLE001 - not answering: next RPC
                     break
             if got is not None:
-                out += got
+                yield from got
                 b = e + 1
                 break
         else:
             raise RuntimeError(f"no RPC returned logs for blocks {b}..")
-    return out
 
 
 def block_times(rpc: Rpc, blocks: list[int], batch: int = 50) -> dict[int, int]:
@@ -219,10 +226,12 @@ def decode(log: dict) -> dict:
     side = "buy" if w[0] == 0 else "sell"
     maker_amt, taker_amt = w[2], w[3]
     shares, usdc = (taker_amt, maker_amt) if side == "buy" else (maker_amt, taker_amt)
-    exchange = log["address"].lower()
+    exchange = sys.intern(log["address"].lower())
+    # interned: a few hundred thousand fills share far fewer transactions, wallets and tokens
     f = {
-        "exchange": exchange, "tx_hash": log["transactionHash"].lower(), "block": int(log["blockNumber"], 16),
-        "maker": "0x" + t[2][-40:], "side": side, "token_id": str(w[1]), "shares": shares, "usdc": usdc,
+        "exchange": exchange, "tx_hash": sys.intern(log["transactionHash"].lower()),
+        "block": int(log["blockNumber"], 16), "maker": sys.intern("0x" + t[2][-40:]), "side": side,
+        "token_id": sys.intern(str(w[1])), "shares": shares, "usdc": usdc,
         "is_taker_order": ("0x" + t[3][-40:]) == exchange,
     }
     if log.get("blockTimestamp"):
@@ -277,23 +286,31 @@ def micro(x) -> int:
     return int((Decimal(str(x)) * 1_000_000).to_integral_value())
 
 
-def load_activity(root: Root, hours: list[tuple[str, str]], lo_s: int, hi_s: int) -> tuple[list[dict], list[str]]:
-    """Activity rows of the curated hours with exchange time in [lo_s, hi_s)."""
-    rows, missing = [], []
-    cols = ["tx_hash", "wallet", "token_id", "side", "size", "price", "exchange_ts", "source"]
+def load_activity(root: Root, hours: list[tuple[str, str]], lo_s: int, hi_s: int
+                  ) -> tuple[Iterator[dict], list[str]]:
+    """(activity rows with exchange time in [lo_s, hi_s), read as they are consumed; hours that are not curated)."""
+    paths, missing = [], []
     for dt, h in hours:
         path = trades_path(root, dt, h)
-        if not root.exists(path):
+        if root.exists(path):
+            paths.append(path)
+        else:
             missing.append(f"{dt}T{h}")
-            continue
-        t = pq.read_table(path, filesystem=root.fs, columns=cols)
-        ts = t["exchange_ts"]
-        per_s = {"s": 1, "ms": 1_000, "us": 1_000_000, "ns": 1_000_000_000}[ts.type.unit]
-        sec = pc.divide(pc.cast(ts, pa.int64()), per_s)
-        keep = pc.and_(pc.equal(t["source"], "activity"),
-                       pc.and_(pc.greater_equal(sec, lo_s), pc.less(sec, hi_s)))
-        rows += t.filter(pc.fill_null(keep, False)).drop_columns(["source"]).to_pylist()
-    return rows, missing
+    return _activity_rows(root, paths, lo_s, hi_s), missing
+
+
+def _activity_rows(root: Root, paths: list[str], lo_s: int, hi_s: int) -> Iterator[dict]:
+    cols = ["tx_hash", "wallet", "token_id", "side", "size", "price", "exchange_ts"]
+    for path in paths:
+        with root.fs.open_input_file(path) as src:
+            parquet = pq.ParquetFile(src, pre_buffer=False)
+            for t in parquet.iter_batches(batch_size=BATCH_ROWS, columns=cols + ["source"], use_threads=False):
+                ts = t.column("exchange_ts")
+                per_s = {"s": 1, "ms": 1_000, "us": 1_000_000, "ns": 1_000_000_000}[ts.type.unit]
+                sec = pc.divide(pc.cast(ts, pa.int64()), per_s)
+                keep = pc.and_(pc.equal(t.column("source"), "activity"),
+                               pc.and_(pc.greater_equal(sec, lo_s), pc.less(sec, hi_s)))
+                yield from t.filter(pc.fill_null(keep, False)).select(cols).to_pylist()
 
 
 def outages(root: Root, hours: list[tuple[str, str]]) -> list[dict]:
@@ -301,7 +318,10 @@ def outages(root: Root, hours: list[tuple[str, str]]) -> list[dict]:
 
     Each carries the `ctl: disconnect` reasons seen inside it (empty for a silence the recorder did not notice).
     """
-    frames: list[int] = []
+    # A silence of SILENCE_MS cannot fit inside one bucket, so it always runs from the last frame of a bucket to
+    # the first frame of the next non-empty one: the other frames need not be kept.
+    first: dict[int, int] = {}
+    last: dict[int, int] = {}
     ctl: list[tuple[int, str]] = []
     for dt, h in hours:
         for ln in iter_raw(root, "polymarket", "activity", dt, h, ReadStats(), "local"):
@@ -313,10 +333,17 @@ def outages(root: Root, hours: list[tuple[str, str]]) -> list[dict]:
                 if rec["ctl"] == "disconnect":
                     ctl.append((ts, str(rec.get("reason"))))
             else:
-                frames.append(ts)
-    frames.sort()
+                k = ts // BUCKET_MS
+                if k not in first:
+                    first[k] = last[k] = ts
+                elif ts < first[k]:
+                    first[k] = ts
+                elif ts > last[k]:
+                    last[k] = ts
+    buckets = sorted(first)
     out = []
-    for a, b in zip(frames, frames[1:]):
+    for ka, kb in zip(buckets, buckets[1:]):
+        a, b = last[ka], first[kb]
         if b - a >= SILENCE_MS:
             out.append({"from_ms": a, "to_ms": b, "s": round((b - a) / 1000, 1),
                         "disconnects": [r for t, r in ctl if a <= t <= b]})
@@ -343,49 +370,54 @@ def _ms(v) -> int:
     return int(v)
 
 
-def reconcile(fills: list[dict], rows: list[dict], t0: int, t1: int, gaps: list[dict]) -> dict:
-    """Multiset join. Counts on-chain fills with block time in [t0, t1) and activity rows with exchange_ts there."""
-    by_key_rows: dict[tuple, list[dict]] = defaultdict(list)
-    for r in rows:
-        by_key_rows[row_key(r)].append(r)
-    by_key_fills: dict[tuple, list[dict]] = defaultdict(list)
-    for f in fills:
-        by_key_fills[fill_key(f)].append(f)
+def reconcile(fills: list[dict], rows: Iterable[dict], t0: int, t1: int, gaps: list[dict]) -> dict:
+    """Multiset join. Counts on-chain fills with block time in [t0, t1) and activity rows with exchange_ts there.
 
-    matched, unmatched_f, unmatched_r = [], [], []
-    for k, fs in by_key_fills.items():
-        # one wallet can fill several equal-size orders in a transaction at different prices: give each row the
-        # remaining fill closest in price, so the fills left over are the ones the feed did not send
-        left = list(fs)
-        for r in by_key_rows.get(k, [])[:len(fs)]:
-            p = float(r["price"])
-            f = min(left, key=lambda f: abs(_price(f) - p))
-            left.remove(f)
-            matched.append((f, r))
-        unmatched_f += left
-    for k, rs in by_key_rows.items():
-        unmatched_r += rs[len(by_key_fills.get(k, ())):]
-
+    `rows` is read once and not kept: each row takes a fill off the index as it arrives.
+    """
     def in_win(f):
         return t0 <= f["block_ts"] < t1
 
     def row_in_win(r):
         return r["exchange_ts"] is not None and t0 * 1000 <= _ms(r["exchange_ts"]) < t1 * 1000
 
-    expected = [f for f in fills if in_win(f)]
-    missing = [f for f in unmatched_f if in_win(f)]
-    extra = [r for r in unmatched_r if row_in_win(r)]
-    bad_price = sum(1 for f, r in matched if abs(float(r["price"]) - _price(f)) > 1e-4)
+    left_by_key: dict[tuple, list[dict]] = defaultdict(list)
+    for f in fills:
+        left_by_key[fill_key(f)].append(f)
+    fill_txs = {f["tx_hash"]: f["tx_hash"] for f in fills}
 
-    fill_txs = {f["tx_hash"] for f in fills}
-    rows_by_tx: Counter = Counter((r["tx_hash"] or "").lower() for r in rows)
+    txs_in_feed: set[str] = set()  # of the fills' transactions, those with at least one row
+    n_rows = n_extra = n_extra_on_chain = bad_price = 0
+    extra_examples: list[dict] = []
+    for r in rows:
+        in_window = row_in_win(r)
+        n_rows += in_window
+        tx = fill_txs.get((r["tx_hash"] or "").lower())
+        if tx is not None:
+            txs_in_feed.add(tx)
+        left = left_by_key.get(row_key(r))
+        if left:
+            # one wallet can fill several equal-size orders in a transaction at different prices: give each row
+            # the remaining fill closest in price, so the fills left over are the ones the feed did not send
+            p = float(r["price"])
+            f = min(left, key=lambda f: abs(_price(f) - p))
+            left.remove(f)
+            bad_price += abs(p - _price(f)) > 1e-4
+        elif in_window:
+            n_extra += 1
+            n_extra_on_chain += tx is not None
+            if len(extra_examples) < EXAMPLES:
+                extra_examples.append(r)
+
+    expected = [f for f in fills if in_win(f)]
+    missing = [f for left in left_by_key.values() for f in left if in_win(f)]
     spans = [(g["from_ms"] / 1000 - 3, g["to_ms"] / 1000 + 1, g) for g in gaps]
 
     def cause(f: dict) -> str:
         for a, b, g in spans:
             if a <= f["block_ts"] <= b:
                 return f"outage:{g['disconnects'][0]}" if g["disconnects"] else "outage:silence"
-        return "tx_partially_in_feed" if rows_by_tx.get(f["tx_hash"]) else "tx_absent_from_feed"
+        return "tx_partially_in_feed" if f["tx_hash"] in txs_in_feed else "tx_absent_from_feed"
 
     label = lambda f: EXCHANGES.get(f["exchange"], f["exchange"])  # noqa: E731
     causes = {id(f): cause(f) for f in missing}
@@ -411,7 +443,7 @@ def reconcile(fills: list[dict], rows: list[dict], t0: int, t1: int, gaps: list[
     return {
         "onchain_fills": len(expected),
         "onchain_txs": len({f["tx_hash"] for f in expected}),
-        "activity_rows_in_window": sum(1 for r in rows if row_in_win(r)),
+        "activity_rows_in_window": n_rows,
         "matched": len(expected) - len(missing),
         "completeness_pct": pct(len(expected) - len(missing), len(expected)),
         "completeness_pct_usdc": pct(usdc_exp - sum(f["usdc"] for f in missing), usdc_exp),
@@ -430,12 +462,12 @@ def reconcile(fills: list[dict], rows: list[dict], t0: int, t1: int, gaps: list[
         "missing": summarise(missing),
         "missing_examples": [{k: f[k] for k in ("tx_hash", "block_ts", "exchange", "maker", "side", "token_id",
                                                 "shares", "usdc", "is_taker_order")} | {"cause": causes[id(f)]}
-                             for f in missing[:20]],
+                             for f in missing[:EXAMPLES]],
         "extra_activity_rows": {
-            "n": len(extra),
-            "tx_on_chain": sum(1 for r in extra if (r["tx_hash"] or "").lower() in fill_txs),
+            "n": n_extra,
+            "tx_on_chain": n_extra_on_chain,
             "examples": [{k: (str(v) if k in ("size", "price", "exchange_ts") else v) for k, v in r.items()}
-                         for r in extra[:20]],
+                         for r in extra_examples],
         },
     }
 
@@ -507,6 +539,14 @@ def run(root_uri: str, dt: str, hours: list[str], cache: str | None = None, rpcs
     return rep
 
 
+def _prefer_as_oom_victim() -> None:
+    """If the container runs out of memory, the kernel should kill this check, not the nightly run that started it."""
+    try:
+        Path("/proc/self/oom_score_adj").write_text("1000")
+    except OSError:  # not Linux
+        pass
+
+
 def main(argv: list[str] | None = None) -> int:
     p = argparse.ArgumentParser(prog="python -m book_pipeline.chain_check", description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -522,13 +562,14 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--out", help="write the JSON report to this file")
     p.add_argument("--write-report", action="store_true", help="write it under <root>/reports/chain/")
     a = p.parse_args(argv)
+    _prefer_as_oom_victim()
     rep = run(a.root, a.dt, a.hour, a.cache, tuple(a.rpc) if a.rpc else None, a.min_feed_pct,
               a.max_outage_loss_pct, write=a.write_report)
     if a.out:
         Path(a.out).write_text(json.dumps(rep, indent=2, default=str))
-    print(json.dumps({k: rep[k] for k in ("ok", "problems", "warnings", "onchain_fills", "completeness_pct",
-                                          "in_scope")},
-                     default=str))
+    line = {k: rep[k] for k in ("ok", "problems", "warnings", "onchain_fills", "completeness_pct", "in_scope")}
+    # the nightly run reads this last line of stdout
+    print(json.dumps({**line, "missing_by_cause": rep["missing"]["by_cause"]}, default=str))
     return 0 if rep["ok"] else 1
 
 

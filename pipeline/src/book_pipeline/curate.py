@@ -55,8 +55,11 @@ def run(raw: str, out_root: str, venue: str, dt: str, hour: str, batch_rows: int
     src, dst = Root.parse(raw), Root.parse(out_root)
     parser = PARSERS[venue]
     tables = schema.load_all()
+    # rows wait as Python objects until their row group is written: smaller groups where a row is big (a snapshot
+    # holds a whole book, a trade a dozen strings)
+    shrink = {"book_snapshots": 40, "trades": 8}
     writers = {t: TableWriter(tables[t], dst, curated_path(dst, t, venue, dt, hour),
-                              batch_rows=batch_rows if t != "book_snapshots" else max(1, batch_rows // 40))
+                              batch_rows=max(1, batch_rows // shrink.get(t, 1)))
                for t in parser.TABLES if t != "coverage"}
     h0 = hour_start_ms(dt, hour)
     out = Out(venue=venue, writers=writers, coverage=CoverageTracker(venue, h0))
