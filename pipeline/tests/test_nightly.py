@@ -198,3 +198,35 @@ def test_chain_hour_starts_a_real_child(tmp_path):
     # an impossible date fails in the child before any network call
     with pytest.raises(RuntimeError, match="exited 1: ValueError"):
         nightly._chain_hour(str(tmp_path), "not-a-date", HOUR)
+
+
+def test_low_replay_warns_without_failing_and_survives_resume(root, monkeypatch):
+    monkeypatch.setattr(nightly.validate, "WARN_MATCH_RATE", 1.01)  # so that the fixture hour is under it
+    for _ in range(2):  # fresh, then read back from the stored report
+        s = nightly.run(str(root), DT, log=_quiet)
+        assert s["ok"], s["failed"]
+        assert [(w["venue"], w["hour"], w["step"]) for w in s["warnings"]] == [("polymarket", HOUR, "validate")]
+    nightly.run(str(root), DT, venues=("cross",), log=_quiet)
+    assert len(_summary(root)["warnings"]) == 1  # a rerun of another venue keeps it
+    monkeypatch.setattr(nightly.validate, "WARN_MATCH_RATE", 0.0)
+    assert nightly.run(str(root), DT, venues=("polymarket",), log=_quiet)["warnings"] == []
+
+
+def test_replay_warning_threshold():
+    warn = nightly.validate.warnings
+    assert warn({"replay": {"match_rate": 0.8607, "outcomes": {"mismatch": 110}}})
+    assert not warn({"replay": {"match_rate": 0.9895}})
+    assert not warn({"replay": {"match_rate": None}})
+    assert not warn({})
+
+
+def test_a_rerun_of_some_hours_keeps_the_other_hours_listed(root):
+    nightly.run(str(root), DT, log=_quiet)
+    path = root / "reports" / "nightly" / f"dt={DT}.json"
+    s = _summary(root)
+    for key in ("hours", "curated", "validated"):
+        s["venues"]["polymarket"][key].append("23")
+    path.write_text(json.dumps(s))
+    vs = nightly.run(str(root), DT, venues=("polymarket",), hours=[HOUR], force=True, log=_quiet)["venues"]["polymarket"]
+    assert vs["hours"] == vs["curated"] == vs["validated"] == [HOUR, "23"]
+    assert vs["failed"] == []

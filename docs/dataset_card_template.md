@@ -24,7 +24,8 @@ UTC date and UTC hour: `data/<table>/<venue>/<YYYY-MM-DD>/part-HH.parquet`.
   the WebSocket. Replaying `book_deltas` between two snapshots must reproduce the second one; the measured match
   rate is below.
 - Connection drops are explicit: a `gap` row in `book_deltas`, and per market per hour in `coverage`. Estimates
-  should exclude or flag hours with `gap_s > 0`.
+  should exclude or flag hours with `gap_s > 0`. A recorder restart that logged no drop is inferred from the raw
+  and marked the same way, from the last line recorded before it.
 - Prices are decimals in dollars per share (probability units, 0 to 1); sizes are decimals; all times are UTC
   milliseconds.
 
@@ -55,4 +56,5 @@ Coverage:
   checked. Kalshi `book_snapshots` come from the same socket as `book_deltas` (`source = ws`), so the Kalshi
   replay check tests sequence integrity, not agreement with an independent source.
 - `coverage` infers the connection state at the start of an hour when the connection opened in an earlier
-  hour (`start_assumed`).
+  hour (`start_assumed`). After a restart that crossed an hour's end, the time before the recorder's first
+  connect in the new hour has no subscription to count: it shows as `subscribed_s` below 3600, not as `gap_s`.

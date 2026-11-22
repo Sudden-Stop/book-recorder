@@ -193,7 +193,7 @@ def book_event(ln: RawLine, out: Out) -> None:
             return
         before = out.coverage.ctl(ln.host, conn, recv, str(ctl), rec.get("assets"))
         if ctl == "disconnect":
-            for i, tok in enumerate(sorted(before)):
+            for i, tok in enumerate(sorted(before), start=rec.get("item0", 0)):
                 out.row("book_deltas", {**base, "item": i, "token_id": tok, "market_id": tok, "action": "gap"})
                 st.books.pop((ln.host, tok), None)
         return

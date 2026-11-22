@@ -4,6 +4,8 @@ Fails (raises `ValidationFailed`, CLI exits 1) when
 - a curated file's schema differs from `schema/<table>.yaml` (drift), or a table file is missing;
 - `strict` and the curate report lists unknown event types or new frame keys (raw-side drift);
 - the replay match rate is below `min_match_rate` (when given and something was evaluated).
+
+Warns, without failing, when the replay match rate is below `WARN_MATCH_RATE` (`warnings`).
 """
 from __future__ import annotations
 
@@ -16,6 +18,11 @@ from . import replay, schema
 from .curate import curated_path, report_path
 from .storage import Root
 from .venues import tables_of
+
+
+# Of the 300 venue-hours of 2026-11-15..21, two were below this: the launch hour (98.4 %) and a recorder
+# restart that coverage had missed (86.1 %). The lowest ordinary hour was 98.95 %.
+WARN_MATCH_RATE = 0.985
 
 
 class ValidationFailed(Exception):
@@ -63,6 +70,16 @@ def raw_drift(root: Root, hours: list[Hour]) -> list[str]:
         if rep.get("read", {}).get("book_events", {}).get("bad_json"):
             problems.append(f"{h.dt}/{h.hour}: unparseable lines in book_events")
     return problems
+
+
+def warnings(report: dict) -> list[str]:
+    """What a validate report (new or stored) says that deserves a look but does not fail the hour."""
+    replayed = report.get("replay") or {}
+    rate = replayed.get("match_rate")
+    if rate is None or rate >= WARN_MATCH_RATE:
+        return []
+    return [f"replay match rate {rate:.2%} < {WARN_MATCH_RATE:.1%} "
+            f"({(replayed.get('outcomes') or {}).get('mismatch', 0)} books differ)"]
 
 
 def coverage_summary(con_paths: list[str]) -> dict:

@@ -1,7 +1,8 @@
 table: coverage
 description: >-
   Recording coverage per market per UTC hour and recorder host, built from the control lines (connect,
-  disconnect, subscribe, unsubscribe) of the market-data stream. A market is covered while one of its tokens is
+  disconnect, subscribe, unsubscribe) of the market-data stream, plus a disconnect inferred at the last recorded
+  line when the recorder restarted without writing one. A market is covered while one of its tokens is
   subscribed on a connection that is up. Use it to drop or flag hours with gaps before estimating anything.
 order: [market_id]
 columns:

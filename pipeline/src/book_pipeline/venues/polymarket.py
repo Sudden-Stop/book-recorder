@@ -77,7 +77,7 @@ def book_event(ln: RawLine, out: Out) -> None:
         before = out.coverage.ctl(ln.host, conn, recv, str(ctl), rec.get("assets"))
         out.stats[f"ctl.{ctl}"] += 1
         if ctl in ("disconnect", "seq_gap"):
-            for i, tok in enumerate(sorted(before)):
+            for i, tok in enumerate(sorted(before), start=rec.get("item0", 0)):
                 out.row("book_deltas", {**base, "item": i, "token_id": tok, "market_id": out.token_market.get(tok),
                                         "action": "gap"})
         return

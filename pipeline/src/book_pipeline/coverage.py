@@ -10,6 +10,7 @@ Connection model (one recorder WebSocket = one `(host, conn)`):
   inferred: a connection whose first control line is not `connect`, or that sends frames before it, was up
   from the start of the hour, subscribed to the tokens it sent frames for before its first `connect` (plus any
   it later unsubscribes). Rows built on that inference have `start_assumed = true`.
+- A recorder that restarted without writing `disconnect` gets one inferred at its last line (see `restarts`).
 - A market is subscribed while any of its tokens is subscribed on any connection of the host, and connected
   while such a connection is also up. Overlapping connections are merged, not added.
 """
@@ -93,6 +94,17 @@ class CoverageTracker:
 
     def live(self, host: str, conn: int) -> set[str]:
         return set(self.conns[(host, conn)].live)
+
+    def up_conns(self, host: str) -> list[int]:
+        """Connections of `host` that nothing so far in the hour has closed."""
+        up = []
+        for (h, conn), c in self.conns.items():
+            if h != host:
+                continue
+            last = next((k for _, k, _ in reversed(c.ctl) if k in ("connect", "disconnect", "connect_error")), None)
+            if last == "connect" or (last is None and (c.first_frame_ms is not None or c.ctl)):
+                up.append(conn)
+        return sorted(up)
 
     # -- result ----------------------------------------------------------------------------------------------
     def _conn_segments(self, c: _Conn):

@@ -86,6 +86,7 @@ class RawLine:
     host: str
     line: int
     rec: dict
+    part: int = 0
 
 
 def local_dir(venue: str, stream: str, dt: str) -> str:
@@ -116,7 +117,7 @@ def raw_files(root: Root, venue: str, stream: str, dt: str, hour: str, local_hos
 
 
 def iter_raw(root: Root, venue: str, stream: str, dt: str, hour: str, stats: ReadStats | None = None,
-             local_host: str = "local") -> Iterator[RawLine]:
+             local_host: str = "local", only_host: str | None = None) -> Iterator[RawLine]:
     """Yield the records of one stream-hour, host by host, parts in order, numbering lines per host.
 
     Reads streaming (one decompressed chunk at a time), so memory does not grow with the file size. A part cut
@@ -127,7 +128,9 @@ def iter_raw(root: Root, venue: str, stream: str, dt: str, hour: str, stats: Rea
     layout, files = raw_files(root, venue, stream, dt, hour, local_host)
     stats.layout = layout
     counters: dict[str, int] = {}
-    for host, _part, path in files:
+    for host, part, path in files:
+        if only_host is not None and host != only_host:
+            continue
         stats.files += 1
         with root.fs.open_input_stream(path, compression=None) as raw:
             for buf in _lines(raw, path, stats):
@@ -142,7 +145,7 @@ def iter_raw(root: Root, venue: str, stream: str, dt: str, hour: str, stats: Rea
                     stats.bad_json += 1
                     continue
                 if isinstance(rec, dict):
-                    yield RawLine(host, n, rec)
+                    yield RawLine(host, n, rec, part)
                 else:
                     stats.bad_json += 1
     stats.by_host = counters

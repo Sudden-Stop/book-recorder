@@ -198,7 +198,7 @@ nightly pipeline timer; the `book-recorder-health-check-failed` alarm should be 
 | Change recorder config | add `BR_*` variables to `.env` (see `recorder/src/config.rs`), then `sudo systemctl reload book-recorder` |
 | Run the pipeline now (yesterday) | `sudo systemctl start book-recorder-pipeline` |
 | Re-run one day | `sudo docker compose --profile nightly run --rm pipeline book-pipeline nightly --dt 2026-11-16` (add `--force` to redo hours already curated) |
-| Pipeline logs | `journalctl -u book-recorder-pipeline -n 200`; the day's summary is `s3://<bucket>/reports/nightly/dt=<day>.json` |
+| Pipeline logs | `journalctl -u book-recorder-pipeline -n 200`; the day's summary is `s3://<bucket>/reports/nightly/dt=<day>.json` (`failed` fails the night; `warnings` lists hours with a low replay match rate) |
 | Stop recording | `sudo systemctl stop book-recorder` (60 s grace to flush the open hour) |
 
 The pipeline container is capped at 1 GB of memory and 1.5 CPUs and runs at low CPU and IO priority at

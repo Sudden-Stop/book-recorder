@@ -4,7 +4,8 @@ description: >-
   touched. Replaying the rows of one token in (host, line, item) order rebuilds its book: a `reset` row clears the
   book (the levels of the full book follow as `set` rows with the same line), a `set` row sets the resting size at
   one price level (0 removes it), and a `gap` row means the connection carrying this token dropped, so the book is
-  unknown until the next `reset`.
+  unknown until the next `reset`. When the recorder restarted without logging the drop, the `gap` row is inferred:
+  its `recv_ts` is that of the last frame recorded before the restart.
 order: [host, line, item]
 columns:
   - name: venue

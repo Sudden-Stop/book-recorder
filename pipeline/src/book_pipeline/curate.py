@@ -9,6 +9,9 @@ Raw input: the S3 layout `raw/venue=<v>/stream=<s>/dt=…/hour=HH/<host>-pN.ndjs
 data directory `{venue}/{stream}/dt=…/HH.pN.ndjson.zst` (attributed to host `local_host`). Every part of the
 hour is read; a part cut short by a crash yields its complete lines.
 
+A recorder restart that left no `disconnect` line gets one inferred (`restarts`), which needs the first lines of
+the host's next recorded hour when the restart crossed the hour's end.
+
 Venues with `WARM` handlers first read streams of the previous hour without writing rows: Kalshi replays
 `book_events` (its deltas are relative) to know each book at the start of the hour, Polymarket reads the tail of
 `activity` so fills whose copies straddle the hour boundary are kept once. A parser's `finish` runs after the
@@ -19,10 +22,12 @@ from __future__ import annotations
 import json
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
+from functools import partial
+from typing import Iterator
 
-from . import schema
+from . import restarts, schema
 from .coverage import CoverageTracker
-from .storage import ReadStats, Root, iter_raw
+from .storage import RawLine, ReadStats, Root, iter_raw, raw_files
 from .venues import PARSERS
 from .venues.common import Out
 from .writer import ROUNDED, TableWriter
@@ -44,6 +49,18 @@ def hour_start_ms(dt: str, hour: str) -> int:
 def previous_hour(dt: str, hour: str) -> tuple[str, str]:
     d = datetime.strptime(f"{dt} {int(hour):02d}", "%Y-%m-%d %H") - timedelta(hours=1)
     return d.strftime("%Y-%m-%d"), d.strftime("%H")
+
+
+def following_raw(src: Root, venue: str, stream: str, dt: str, hour: str, host: str,
+                  local_host: str = "local", hours: int = 24) -> Iterator[RawLine]:
+    """The host's lines in the first later hour, up to `hours` ahead, in which it recorded the stream."""
+    start = datetime.strptime(f"{dt} {int(hour):02d}", "%Y-%m-%d %H")
+    for ahead in range(1, hours + 1):
+        t = start + timedelta(hours=ahead)
+        d, h = t.strftime("%Y-%m-%d"), t.strftime("%H")
+        if any(f[0] == host for f in raw_files(src, venue, stream, d, h, local_host)[1]):
+            yield from iter_raw(src, venue, stream, d, h, local_host=local_host, only_host=host)
+            return
 
 
 def run(raw: str, out_root: str, venue: str, dt: str, hour: str, batch_rows: int = 200_000,
@@ -76,7 +93,11 @@ def run(raw: str, out_root: str, venue: str, dt: str, hour: str, batch_rows: int
     for stream, fn in parser.STREAMS:
         st = ReadStats()
         handler = getattr(parser, fn)
-        for ln in iter_raw(src, venue, stream, dt, hour, st, local_host):
+        lines = iter_raw(src, venue, stream, dt, hour, st, local_host)
+        if stream == restarts.STREAM:
+            following = partial(following_raw, src, venue, stream, dt, hour, local_host=local_host)
+            lines = restarts.with_disconnects(lines, out, following)
+        for ln in lines:
             handler(ln, out)
         read[stream] = asdict(st)
     if hasattr(parser, "finish"):

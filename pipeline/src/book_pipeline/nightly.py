@@ -15,6 +15,9 @@ every socket was down, or the feed below 99 % outside outages. The feed's usual 
 and skipped blocks) is a warning only (`chain_check.problems` / `warnings`). Each hour is checked in a process
 of its own, so running out of memory or hanging costs that hour's check and nothing else.
 
+A validated hour with a low replay match rate (`validate.warnings`) is listed under the summary's `warnings`:
+it does not fail the night, but the books of that hour deserve a look before they are used.
+
 A rerun lists what is still failing, not only what failed during the rerun: the validate and chain reports of
 skipped hours are read back, and a rerun of some venues or hours keeps the rest of the day's summary.
 
@@ -68,7 +71,7 @@ def run(root_uri: str, dt: str, venues: tuple[str, ...] = VENUES, hours: list[st
         min_match_rate: float | None = None, memory_limit: str = "256MB", local_host: str = "local",
         chain: bool | None = None, log: Callable[[dict], None] = lambda e: print(json.dumps(e, default=str), flush=True)) -> dict:
     root = Root.parse(root_uri)
-    summary: dict = {"dt": dt, "root": root_uri, "venues": {}, "failed": [],
+    summary: dict = {"dt": dt, "root": root_uri, "venues": {}, "failed": [], "warnings": [],
                      "started_at": datetime.now(timezone.utc).isoformat(timespec="seconds")}
     for venue in venues:
         if venue not in PARSERS:
@@ -96,6 +99,7 @@ def run(root_uri: str, dt: str, venues: tuple[str, ...] = VENUES, hours: list[st
             if done and not force:
                 prev = _read_json(root, curate.report_path(root, "validate", venue, dt, h))
                 if prev is not None and "ok" in prev:
+                    _warn(summary, venue, h, prev, log)
                     if not prev["ok"]:
                         _fail(summary, vs, venue, h, "validate", _validate_error(prev), log)
                     continue
@@ -104,10 +108,12 @@ def run(root_uri: str, dt: str, venues: tuple[str, ...] = VENUES, hours: list[st
                 rep = validate.run(root_uri, [validate.Hour(venue, dt, h)], window_ms=window_ms,
                                    min_match_rate=min_match_rate, memory_limit=memory_limit)
                 vs["validated"].append(h)
+                _warn(summary, venue, h, rep, log)
                 log({"step": "validate", "venue": venue, "hour": h, "ok": True,
                      "match_rate": rep.get("replay", {}).get("match_rate"),
                      "connected_share": rep.get("coverage", {}).get("connected_share")})
             except validate.ValidationFailed as e:
+                _warn(summary, venue, h, e.report, log)
                 _fail(summary, vs, venue, h, "validate", "; ".join(e.problems), log)
             except Exception as e:
                 _fail(summary, vs, venue, h, "validate", f"{type(e).__name__}: {e}", log)
@@ -219,6 +225,12 @@ def _carry_over(summary: dict, prev: dict | None, chain_known: set[str]) -> None
     for venue, vs in prev.get("venues", {}).items():
         if venue not in ran:
             summary["venues"][venue] = vs
+            continue
+        mine = summary["venues"][venue]
+        for key, listed in vs.items():  # a rerun of some hours keeps what is listed for the others
+            others = [] if key == "failed" else [h for h in listed if h not in ran[venue]]
+            if others:
+                mine[key] = sorted({*mine.get(key, []), *others})
     for f in prev.get("failed", []):
         venue, hour = f["venue"], f["hour"]
         looked_at = hour in ran.get(venue, ())
@@ -229,6 +241,9 @@ def _carry_over(summary: dict, prev: dict | None, chain_known: set[str]) -> None
         summary["failed"].append(f)
         if venue in ran:
             summary["venues"][venue]["failed"].append(hour)
+    for w in prev.get("warnings", []):
+        if w["hour"] not in ran.get(w["venue"], ()):
+            summary["warnings"].append(w)
 
 
 def _release() -> None:
@@ -241,6 +256,13 @@ def _release() -> None:
             ctypes.CDLL("libc.so.6").malloc_trim(0)
         except (OSError, AttributeError):  # not glibc
             pass
+
+
+def _warn(summary: dict, venue: str, hour: str, report: dict, log) -> None:
+    for text in validate.warnings(report):
+        entry = {"venue": venue, "hour": hour, "step": "validate", "warning": text}
+        summary["warnings"].append(entry)
+        log(entry)
 
 
 def _fail(summary: dict, vs: dict, venue: str, hour: str, step: str, error: str, log) -> None:

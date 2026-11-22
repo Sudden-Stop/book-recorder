@@ -111,7 +111,8 @@ def main(argv: list[str] | None = None) -> int:
                               force=args.force, batch_rows=args.batch_rows, window_ms=args.window_ms,
                               min_match_rate=args.min_match_rate, memory_limit=args.memory_limit,
                               local_host=args.local_host, chain=args.chain)
-        print(json.dumps({"dt": summary["dt"], "ok": summary["ok"], "failed": summary["failed"]}))
+        print(json.dumps({"dt": summary["dt"], "ok": summary["ok"], "failed": summary["failed"],
+                          "warnings": summary["warnings"]}))
         return 0 if summary["ok"] else 1
     if args.cmd == "publish":
         manifest = publish.stage(args.curated, args.stage, wallets=args.wallets, tables=tuple(args.tables),
